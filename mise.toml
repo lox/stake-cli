@@ -1,0 +1,27 @@
+[tools]
+go = "1.25.1"
+"github:golangci/golangci-lint" = "v2.11.4"
+
+[tasks.build]
+description = "Build the stake-api-server and stake-cli binaries"
+run = [
+  "mkdir -p dist",
+  "go build -o dist/stake-api-server ./cmd/stake-api-server",
+  "go build -o dist/stake-cli ./cmd/stake-cli",
+]
+
+[tasks.test]
+description = "Run tests"
+run = "go test -v ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run"
+
+[tasks.tidy]
+description = "Tidy Go modules"
+run = "go mod tidy"
+
+[tasks.run]
+description = "Run stake-api-server"
+run = "go run ./cmd/stake-api-server"
