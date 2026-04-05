@@ -5,13 +5,13 @@
 It exposes two binaries:
 
 - `stake-cli`, a command-line client that talks directly to the Stake API using locally stored session tokens
-- `stake-api-server`, a local mirror that keeps stored sessions warm, serves account metadata, and proxies requests through those sessions
+- `stake-api-server`, a local proxy that keeps stored sessions warm, serves account metadata, and proxies requests through those sessions
 
 ## Features
 
 - XDG-backed local auth store
 - Direct CLI access to Stake using stored session tokens
-- Local mirror and read-only REST API for multi-account access
+- Local proxy and read-only REST API for multi-account access
 - Background session keepalive to help short-lived tokens stay usable
 - Normalized ASX and US trades from Stake
 
@@ -25,7 +25,26 @@ import "github.com/lox/stake-cli/pkg/stake"
 
 ## Auth Setup
 
-To find a Stake session token:
+Preferred browser-first login:
+
+```bash
+./dist/stake-cli auth login personal
+./dist/stake-cli auth login family-trust
+```
+
+That flow opens a visible browser at Stake's login page and lets you complete login and MFA.
+
+If the alias is new, the CLI waits for you to press Enter in the terminal before capturing `localStorage.sessionKey`.
+
+If the alias already exists in the auth store and has a known `user_id`, `auth login` watches for `sessionKey` automatically, validates the browser session, and switches it to that stored account before saving the token. That makes it safer to refresh non-default accounts such as trusts without manually switching in the UI first.
+
+Stored auth defaults to:
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/stake-cli/accounts.json
+```
+
+Fallback manual token capture:
 
 1. Log in to [Stake](https://hellostake.com) in your browser.
 2. Select the account you want to use.
@@ -42,20 +61,17 @@ Add one or more Stake accounts with a local name and session token:
 ./dist/stake-cli auth add secondary --token "your-session-token"
 ```
 
-Stored auth defaults to:
-
-```text
-${XDG_CONFIG_HOME:-~/.config}/stake-cli/accounts.json
-```
-
 The CLI validates the token against `/api/user`, stores the discovered account metadata, and will persist any fresher `Stake-Session-Token` value that later responses return.
 
 Useful auth commands:
 
 ```bash
 ./dist/stake-cli auth list
+./dist/stake-cli auth probe primary --interval 30s
 ./dist/stake-cli auth remove primary
 ```
+
+`auth probe` keeps validating one stored session until it fails, you interrupt it, or `--max-attempts` is reached. Each probe result is logged to stderr, and the final JSON summary on stdout records how long the token survived, whether Stake rotated it, and the last validation error.
 
 ## Direct CLI
 
@@ -72,9 +88,18 @@ For testing, you can point the CLI at a different API base URL:
 ./dist/stake-cli --base-url http://127.0.0.1:18081 user primary
 ```
 
+To run account operations through `stake-api-server` instead of talking to Stake directly, pass `--proxy`:
+
+```bash
+./dist/stake-cli --proxy http://127.0.0.1:8081 user primary
+./dist/stake-cli --proxy http://127.0.0.1:8081 trades primary
+```
+
 ## Server
 
 `stake-api-server` reads the same auth store, periodically validates each stored token, and persists any refreshed token value it sees in response headers.
+
+For proxied Stake requests, send the local account name in `Stake-Session-Token` and the server will swap it for the current stored token for that account before forwarding the request upstream.
 
 ```bash
 mise trust
@@ -82,6 +107,14 @@ mise install
 mise run build
 
 ./dist/stake-api-server --account primary
+```
+
+Proxy example:
+
+```bash
+curl \
+  -H "Stake-Session-Token: primary" \
+  http://127.0.0.1:8081/api/user
 ```
 
 Or run directly:
@@ -100,18 +133,18 @@ Useful server flags:
 
 ## API
 
+- `ANY /api/...` proxied to Stake using `Stake-Session-Token: <stored-account-name>`
 - `GET /healthz`
 - `GET /v1/accounts`
 - `GET /v1/accounts/{account}`
 - `GET /v1/accounts/{account}/user`
 - `GET /v1/accounts/{account}/trades`
-- `ANY /v1/accounts/{account}/mirror/{path...}`
 
 Example:
 
 ```bash
+curl -H "Stake-Session-Token: primary" http://127.0.0.1:8081/api/user
 curl http://127.0.0.1:8081/v1/accounts
 curl http://127.0.0.1:8081/v1/accounts/primary/user
 curl http://127.0.0.1:8081/v1/accounts/primary/trades
-curl http://127.0.0.1:8081/v1/accounts/primary/mirror/api/user
 ```

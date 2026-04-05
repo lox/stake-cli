@@ -321,7 +321,7 @@ func TestHandlerReturnsBadGatewayOnUpstreamError(t *testing.T) {
 	}
 }
 
-func TestHandlerMirrorRoute(t *testing.T) {
+func TestHandlerProxyRouteUsesAccountAliasHeader(t *testing.T) {
 	client := &fakeClient{
 		proxyResponse: &stake.HTTPResponse{
 			StatusCode: http.StatusCreated,
@@ -338,25 +338,58 @@ func TestHandlerMirrorRoute(t *testing.T) {
 	)
 
 	handler := NewHandler(service, log.New(os.Stderr))
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/accounts/primary/mirror/api/user?include=positions", strings.NewReader(`{"a":1}`))
-	request.Header.Set("Content-Type", "application/json")
 
-	handler.ServeHTTP(recorder, request)
+	t.Run("proxies request", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/user?include=positions", strings.NewReader(`{"a":1}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Stake-Session-Token", "primary")
 
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", recorder.Code)
-	}
-	if client.proxyMethod != http.MethodPost {
-		t.Fatalf("expected proxy method POST, got %s", client.proxyMethod)
-	}
-	if client.proxyPath != "/api/user?include=positions" {
-		t.Fatalf("expected proxy path /api/user?include=positions, got %s", client.proxyPath)
-	}
-	if string(client.proxyBody) != `{"a":1}` {
-		t.Fatalf("unexpected proxy body: %s", string(client.proxyBody))
-	}
-	if got := recorder.Header().Get("Stake-Session-Token"); got != "" {
-		t.Fatalf("expected mirrored token header to be stripped, got %q", got)
-	}
+		handler.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d", recorder.Code)
+		}
+		if client.proxyMethod != http.MethodPost {
+			t.Fatalf("expected proxy method POST, got %s", client.proxyMethod)
+		}
+		if client.proxyPath != "/api/user?include=positions" {
+			t.Fatalf("expected proxy path /api/user?include=positions, got %s", client.proxyPath)
+		}
+		if string(client.proxyBody) != `{"a":1}` {
+			t.Fatalf("unexpected proxy body: %s", string(client.proxyBody))
+		}
+		if got := recorder.Header().Get("Stake-Session-Token"); got != "" {
+			t.Fatalf("expected mirrored token header to be stripped, got %q", got)
+		}
+	})
+
+	t.Run("requires alias header", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/user", nil)
+
+		handler.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", recorder.Code)
+		}
+	})
+
+	t.Run("supports legacy mirror route", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/accounts/primary/mirror/api/user?include=positions", strings.NewReader(`{"a":1}`))
+		request.Header.Set("Content-Type", "application/json")
+
+		handler.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d", recorder.Code)
+		}
+		if client.proxyMethod != http.MethodPost {
+			t.Fatalf("expected proxy method POST, got %s", client.proxyMethod)
+		}
+		if client.proxyPath != "/api/user?include=positions" {
+			t.Fatalf("expected proxy path /api/user?include=positions, got %s", client.proxyPath)
+		}
+	})
 }

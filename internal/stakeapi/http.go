@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -20,10 +21,10 @@ type apiService interface {
 	Account(name string) (AccountStatus, error)
 	Validate(ctx context.Context, name string) (AccountStatus, error)
 	FetchTrades(ctx context.Context, name string) ([]*types.Trade, error)
-	Mirror(ctx context.Context, name string, method string, path string, body []byte, headers http.Header) (*stake.HTTPResponse, error)
+	Proxy(ctx context.Context, name string, method string, path string, body []byte, headers http.Header) (*stake.HTTPResponse, error)
 }
 
-// NewHandler builds the internal read-only REST API for Stake account access.
+// NewHandler builds the local Stake proxy plus read-only account endpoints.
 func NewHandler(service *Service, logger *log.Logger) http.Handler {
 	if logger == nil {
 		logger = log.New(io.Discard)
@@ -40,7 +41,8 @@ func NewHandler(service *Service, logger *log.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/accounts/{account}", handler.account)
 	mux.HandleFunc("GET /v1/accounts/{account}/user", handler.user)
 	mux.HandleFunc("GET /v1/accounts/{account}/trades", handler.trades)
-	mux.HandleFunc("/v1/accounts/{account}/mirror/{path...}", handler.mirror)
+	mux.HandleFunc("/v1/accounts/{account}/mirror/{path...}", handler.legacyProxy)
+	mux.HandleFunc("/", handler.proxy)
 	return mux
 }
 
@@ -161,19 +163,33 @@ func (h *httpHandler) trades(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *httpHandler) mirror(w http.ResponseWriter, r *http.Request) {
+func (h *httpHandler) proxy(w http.ResponseWriter, r *http.Request) {
+	accountName := strings.TrimSpace(r.Header.Get("Stake-Session-Token"))
+	if accountName == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "Stake-Session-Token header must contain a stored account name"})
+		return
+	}
+
+	h.proxyRequest(w, r, accountName, r.URL.Path)
+}
+
+func (h *httpHandler) legacyProxy(w http.ResponseWriter, r *http.Request) {
+	proxyPath := "/" + strings.TrimPrefix(r.PathValue("path"), "/")
+	h.proxyRequest(w, r, r.PathValue("account"), proxyPath)
+}
+
+func (h *httpHandler) proxyRequest(w http.ResponseWriter, r *http.Request, accountName string, proxyPath string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.writeError(w, fmt.Errorf("read proxy request body: %w", err))
 		return
 	}
 
-	proxyPath := "/" + r.PathValue("path")
 	if r.URL.RawQuery != "" {
 		proxyPath += "?" + r.URL.RawQuery
 	}
 
-	response, err := h.service.Mirror(r.Context(), r.PathValue("account"), r.Method, proxyPath, body, r.Header)
+	response, err := h.service.Proxy(r.Context(), accountName, r.Method, proxyPath, body, r.Header)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -183,7 +199,7 @@ func (h *httpHandler) mirror(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Stake-Session-Token")
 	w.WriteHeader(response.StatusCode)
 	if _, err := w.Write(response.Body); err != nil {
-		h.logger.Warn("Writing mirrored Stake response failed", "error", err)
+		h.logger.Warn("Writing proxied Stake response failed", "error", err)
 	}
 }
 

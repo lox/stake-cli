@@ -28,7 +28,7 @@ var cli struct {
 func main() {
 	ctx := kong.Parse(&cli,
 		kong.Name("stake-api-server"),
-		kong.Description("Local Stake mirror and read-only REST API backed by stored session tokens"),
+		kong.Description("Local Stake proxy and read-only REST API backed by stored session tokens"),
 		kong.UsageOnError(),
 	)
 

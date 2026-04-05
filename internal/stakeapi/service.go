@@ -368,8 +368,8 @@ func (s *Service) FetchTrades(ctx context.Context, name string) ([]*types.Trade,
 	return trades, nil
 }
 
-// Mirror proxies one request through the stored Stake session for an account.
-func (s *Service) Mirror(ctx context.Context, name string, method string, path string, body []byte, headers http.Header) (*stake.HTTPResponse, error) {
+// Proxy proxies one request through the stored Stake session for an account.
+func (s *Service) Proxy(ctx context.Context, name string, method string, path string, body []byte, headers http.Header) (*stake.HTTPResponse, error) {
 	account, err := s.lookup(name)
 	if err != nil {
 		return nil, err

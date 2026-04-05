@@ -20,6 +20,8 @@ import (
 
 const DefaultBaseURL = "https://api2.prd.hellostake.com"
 
+const defaultStakeWebClientVersion = "7.0.5"
+
 // Client represents a Stake API client
 type Client struct {
 	httpClient *http.Client
@@ -85,6 +87,32 @@ func (c *Client) ValidateSession(ctx context.Context) (*User, error) {
 		return nil, fmt.Errorf("validating session: %w", err)
 	}
 	return &user, nil
+}
+
+// SwitchUser switches the active Stake account for the current session.
+func (c *Client) SwitchUser(ctx context.Context, userID string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return fmt.Errorf("user ID is required")
+	}
+
+	body, err := json.Marshal(struct {
+		UserID string `json:"userId"`
+	}{UserID: userID})
+	if err != nil {
+		return fmt.Errorf("encode switch user payload: %w", err)
+	}
+
+	headers := http.Header{}
+	headers.Set("X-Server-Select", "AUS")
+	headers.Set("X-Stake-Client-Version", defaultStakeWebClientVersion)
+	headers.Set("X-Stake-Platform", "WEB")
+
+	if err := c.doRequest(ctx, http.MethodPut, "/api/user/switch", body, headers, nil); err != nil {
+		return fmt.Errorf("switching user: %w", err)
+	}
+
+	return nil
 }
 
 // FetchTrades retrieves all trades from both ASX and NYSE exchanges

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/log"
@@ -51,6 +52,89 @@ func TestValidateSessionRefreshesSessionToken(t *testing.T) {
 	}
 	if refreshedToken != "rotated-token" {
 		t.Fatalf("expected callback token rotated-token, got %q", refreshedToken)
+	}
+}
+
+func TestSwitchUserSendsExpectedHeadersAndRefreshesSessionToken(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodPut {
+				t.Fatalf("expected PUT request, got %s", r.Method)
+			}
+			if r.URL.Path != "/api/user/switch" {
+				t.Fatalf("expected /api/user/switch path, got %s", r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "initial-token" {
+				t.Fatalf("expected initial token header, got %q", got)
+			}
+			if got := r.Header.Get("X-Stake-Platform"); got != "WEB" {
+				t.Fatalf("expected X-Stake-Platform WEB, got %q", got)
+			}
+			if got := r.Header.Get("X-Server-Select"); got != "AUS" {
+				t.Fatalf("expected X-Server-Select AUS, got %q", got)
+			}
+			if got := r.Header.Get("X-Stake-Client-Version"); got != defaultStakeWebClientVersion {
+				t.Fatalf("expected X-Stake-Client-Version %q, got %q", defaultStakeWebClientVersion, got)
+			}
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+				t.Fatalf("expected JSON content type, got %q", got)
+			}
+
+			var payload struct {
+				UserID string `json:"userId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decoding switch payload: %v", err)
+			}
+			if payload.UserID != "target-user" {
+				t.Fatalf("expected target-user payload, got %q", payload.UserID)
+			}
+
+			w.Header().Set("Stake-Session-Token", "rotated-switch-token")
+			w.WriteHeader(http.StatusNoContent)
+		case 2:
+			if r.Method != http.MethodGet {
+				t.Fatalf("expected GET request, got %s", r.Method)
+			}
+			if r.URL.Path != "/api/user" {
+				t.Fatalf("expected /api/user path, got %s", r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "rotated-switch-token" {
+				t.Fatalf("expected rotated switch token header, got %q", got)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(User{UserID: "target-user", Email: "account@example.test"}); err != nil {
+				t.Fatalf("encoding validate response: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected extra request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	refreshedToken := ""
+	client := NewClient(Config{
+		BaseURL:      server.URL,
+		SessionToken: "initial-token",
+		OnSessionToken: func(token string) {
+			refreshedToken = token
+		},
+	}, log.New(io.Discard))
+
+	if err := client.SwitchUser(context.Background(), "target-user"); err != nil {
+		t.Fatalf("SwitchUser returned error: %v", err)
+	}
+	if _, err := client.ValidateSession(context.Background()); err != nil {
+		t.Fatalf("ValidateSession returned error: %v", err)
+	}
+
+	if refreshedToken != "rotated-switch-token" {
+		t.Fatalf("expected callback token rotated-switch-token, got %q", refreshedToken)
 	}
 }
 
