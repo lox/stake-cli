@@ -1,6 +1,7 @@
 [tools]
 go = "1.25.1"
 "github:golangci/golangci-lint" = "v2.11.4"
+svu = "3.3.0"
 
 [tasks.build]
 description = "Build the stake-api-server and stake-cli binaries"
@@ -18,6 +19,10 @@ run = "go test -v ./..."
 description = "Run golangci-lint"
 run = "golangci-lint run"
 
+[tasks.check]
+description = "Run all checks (build, test, lint)"
+depends = ["build", "test", "lint"]
+
 [tasks.tidy]
 description = "Tidy Go modules"
 run = "go mod tidy"
@@ -25,3 +30,19 @@ run = "go mod tidy"
 [tasks.run]
 description = "Run stake-api-server"
 run = "go run ./cmd/stake-api-server"
+
+[tasks.release]
+description = "Tag the next version and push to trigger a release"
+depends = ["check"]
+run = """
+NEXT=$(svu next)
+CURRENT=$(svu current)
+if [ "$NEXT" = "$CURRENT" ]; then
+  echo "No version bump detected (current: $CURRENT). Use conventional commits (feat:, fix:, etc.)."
+  exit 1
+fi
+echo "Releasing $CURRENT -> $NEXT"
+git tag "$NEXT"
+git push origin "$NEXT"
+echo "Tagged and pushed $NEXT - release workflow will run on GitHub."
+"""
