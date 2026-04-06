@@ -4,10 +4,9 @@ go = "1.25.1"
 svu = "3.3.0"
 
 [tasks.build]
-description = "Build the stake-api-server and stake-cli binaries"
+description = "Build the stake-cli binary"
 run = [
   "mkdir -p dist",
-  "go build -o dist/stake-api-server ./cmd/stake-api-server",
   "go build -o dist/stake-cli ./cmd/stake-cli",
 ]
 
@@ -26,10 +25,6 @@ depends = ["build", "test", "lint"]
 [tasks.tidy]
 description = "Tidy Go modules"
 run = "go mod tidy"
-
-[tasks.run]
-description = "Run stake-api-server"
-run = "go run ./cmd/stake-api-server"
 
 [tasks.release]
 description = "Tag the next version and push to trigger a release"

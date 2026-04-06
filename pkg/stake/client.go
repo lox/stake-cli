@@ -63,13 +63,6 @@ func NewClient(cfg Config, logger *log.Logger) *Client {
 	}
 }
 
-// HTTPResponse is a raw HTTP response returned by the proxy helper.
-type HTTPResponse struct {
-	StatusCode int
-	Header     http.Header
-	Body       []byte
-}
-
 // User represents the Stake user profile
 type User struct {
 	UserID      string `json:"userId"`
@@ -156,19 +149,6 @@ func (c *Client) FetchTrades(ctx context.Context, account string) ([]*types.Trad
 	}
 
 	return allTrades, nil
-}
-
-// Proxy forwards an arbitrary authenticated request to the Stake API.
-func (c *Client) Proxy(ctx context.Context, method string, path string, body []byte, headers http.Header) (*HTTPResponse, error) {
-	resp, respBody, err := c.doRequestRaw(ctx, method, path, body, headers)
-	if err != nil {
-		return nil, err
-	}
-	return &HTTPResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		Body:       respBody,
-	}, nil
 }
 
 // ASX API types
