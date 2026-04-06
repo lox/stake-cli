@@ -15,6 +15,8 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 		Name:         "primary",
 		SessionToken: "token-1",
 		UserID:       "user-123",
+		OPItem:       "op://Private/stake.com",
+		OPAccount:    "my.1password.com",
 		Email:        "account@example.test",
 		Username:     "sample-user",
 		AccountType:  "individual",
@@ -39,6 +41,12 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if entry.Email != "account@example.test" {
 		t.Fatalf("expected email to round-trip, got %q", entry.Email)
+	}
+	if entry.OPItem != "op://Private/stake.com" {
+		t.Fatalf("expected op item to round-trip, got %q", entry.OPItem)
+	}
+	if entry.OPAccount != "my.1password.com" {
+		t.Fatalf("expected op account to round-trip, got %q", entry.OPAccount)
 	}
 	if !entry.UpdatedAt.Equal(updatedAt) {
 		t.Fatalf("expected updated_at %s, got %s", updatedAt, entry.UpdatedAt)

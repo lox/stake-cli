@@ -19,6 +19,8 @@ type Entry struct {
 	Name         string    `json:"name"`
 	SessionToken string    `json:"session_token"`
 	UserID       string    `json:"user_id,omitempty"`
+	OPItem       string    `json:"op_item,omitempty"`
+	OPAccount    string    `json:"op_account,omitempty"`
 	Email        string    `json:"email,omitempty"`
 	Username     string    `json:"username,omitempty"`
 	AccountType  string    `json:"account_type,omitempty"`
@@ -220,6 +222,8 @@ func (e *Entry) normalize() {
 	e.Name = strings.TrimSpace(e.Name)
 	e.SessionToken = strings.TrimSpace(e.SessionToken)
 	e.UserID = strings.TrimSpace(e.UserID)
+	e.OPItem = strings.TrimSpace(e.OPItem)
+	e.OPAccount = strings.TrimSpace(e.OPAccount)
 	e.Email = strings.TrimSpace(e.Email)
 	e.Username = strings.TrimSpace(e.Username)
 	e.AccountType = strings.TrimSpace(e.AccountType)

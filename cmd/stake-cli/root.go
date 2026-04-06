@@ -177,7 +177,7 @@ type authAddCmd struct {
 }
 
 func (c *authAddCmd) Run(runtime *runtime) error {
-	view, err := runtime.validateAndStoreAccount(c.Name, c.Token)
+	view, err := runtime.validateAndStoreAccount(c.Name, c.Token, nil)
 	if err != nil {
 		return err
 	}
@@ -200,7 +200,7 @@ func (c *authLoginCmd) Run(runtime *runtime) error {
 	if err != nil {
 		return err
 	}
-	onePassword, err := c.onePasswordConfig()
+	onePassword, err := c.onePasswordConfig(runtime)
 	if err != nil {
 		return err
 	}
@@ -223,7 +223,7 @@ func (c *authLoginCmd) Run(runtime *runtime) error {
 		return writeOutput(runtime.stdout, result)
 	}
 
-	view, err := runtime.validateAndStoreAccount(c.Name, result.SessionToken)
+	view, err := runtime.validateAndStoreAccount(c.Name, result.SessionToken, &onePassword)
 	if err != nil {
 		return fmt.Errorf("validate captured session token: %w", err)
 	}
@@ -234,9 +234,23 @@ func (c *authLoginCmd) Run(runtime *runtime) error {
 	})
 }
 
-func (c *authLoginCmd) onePasswordConfig() (stakelogin.OnePasswordConfig, error) {
+func (c *authLoginCmd) onePasswordConfig(runtime *runtime) (stakelogin.OnePasswordConfig, error) {
 	itemReference := strings.TrimSpace(c.OPItem)
 	desktopAccount := strings.TrimSpace(c.OPAccount)
+	if itemReference == "" || desktopAccount == "" {
+		entry, err := runtime.storedAccount(c.Name)
+		if err != nil && !errors.Is(err, authstore.ErrAccountNotFound) {
+			return stakelogin.OnePasswordConfig{}, err
+		}
+		if err == nil {
+			if itemReference == "" {
+				itemReference = strings.TrimSpace(entry.OPItem)
+			}
+			if desktopAccount == "" && strings.TrimSpace(c.OPItem) == "" {
+				desktopAccount = strings.TrimSpace(entry.OPAccount)
+			}
+		}
+	}
 	if itemReference == "" {
 		if desktopAccount != "" {
 			return stakelogin.OnePasswordConfig{}, fmt.Errorf("--op-account requires --op-item")
@@ -267,7 +281,7 @@ func (r *runtime) expectedLoginUserID(name string) (string, error) {
 	return strings.TrimSpace(entry.UserID), nil
 }
 
-func (r *runtime) validateAndStoreAccount(name string, token string) (authstore.View, error) {
+func (r *runtime) validateAndStoreAccount(name string, token string, onePassword *stakelogin.OnePasswordConfig) (authstore.View, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return authstore.View{}, fmt.Errorf("stake session token is required")
@@ -293,7 +307,23 @@ func (r *runtime) validateAndStoreAccount(name string, token string) (authstore.
 		AccountType:  user.AccountType,
 		UpdatedAt:    time.Now().UTC(),
 	}
+	if onePassword != nil {
+		entry.OPItem = strings.TrimSpace(onePassword.ItemReference)
+		entry.OPAccount = strings.TrimSpace(onePassword.DesktopAccount)
+	}
 	if err := authstore.Update(r.authStorePath, func(store *authstore.File) error {
+		stored, err := store.Get(name)
+		if err != nil && !errors.Is(err, authstore.ErrAccountNotFound) {
+			return err
+		}
+		if err == nil {
+			if entry.OPItem == "" {
+				entry.OPItem = stored.OPItem
+			}
+			if entry.OPAccount == "" {
+				entry.OPAccount = stored.OPAccount
+			}
+		}
 		store.Upsert(entry)
 		return nil
 	}); err != nil {

@@ -58,6 +58,8 @@ Desktop-app auth:
   --op-account my.1password.com
 ```
 
+After a successful login, `stake-cli` stores the resolved `op-item` and `op-account` alongside that account's saved metadata, so later runs can usually use a bare command such as `./dist/stake-cli auth login family-trust`.
+
 The 1Password-backed flow expects the item to expose Stake credentials through standard fields:
 
 - `username` for the email address

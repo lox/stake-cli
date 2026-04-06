@@ -443,6 +443,116 @@ func TestExecuteAuthLoginCommandPassesOnePasswordDesktopAccountConfig(t *testing
 	}
 }
 
+func TestExecuteAuthLoginCommandUsesStoredOnePasswordConfig(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &authstore.File{}
+	store.Upsert(authstore.Entry{
+		Name:      "personal",
+		UserID:    "stored-user-id",
+		OPItem:    "op://Private/stake.com",
+		OPAccount: "my.1password.com",
+	})
+	if err := authstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{
+			Account: cfg.AccountName,
+			Status:  "manual_login_pending",
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"auth", "login", "personal",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.ExpectedUserID != "stored-user-id" {
+		t.Fatalf("expected stored user id to be forwarded, got %q", capturedConfig.ExpectedUserID)
+	}
+	if capturedConfig.OnePassword.ItemReference != "op://Private/stake.com" {
+		t.Fatalf("unexpected stored 1Password item reference: %q", capturedConfig.OnePassword.ItemReference)
+	}
+	if capturedConfig.OnePassword.DesktopAccount != "my.1password.com" {
+		t.Fatalf("unexpected stored 1Password desktop account: %q", capturedConfig.OnePassword.DesktopAccount)
+	}
+}
+
+func TestExecuteAuthLoginCommandStoresOnePasswordConfig(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/user" {
+			t.Fatalf("expected /api/user path, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+			t.Fatalf("expected captured token header, got %q", got)
+		}
+
+		w.Header().Set("Stake-Session-Token", "rotated-login-token")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-123", Email: "account@example.test", Username: "sample-user", AccountType: "individual"}); err != nil {
+			t.Fatalf("encoding response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		return &stakelogin.Result{
+			Account:      cfg.AccountName,
+			Status:       "session_token_detected",
+			SessionToken: "captured-token",
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"--base-url", server.URL,
+		"auth", "login", "personal",
+		"--op-item", "op://Private/stake.com",
+		"--op-account", "my.1password.com",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	store, err := authstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	entry, err := store.Get("personal")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if entry.OPItem != "op://Private/stake.com" {
+		t.Fatalf("expected stored op item, got %q", entry.OPItem)
+	}
+	if entry.OPAccount != "my.1password.com" {
+		t.Fatalf("expected stored op account, got %q", entry.OPAccount)
+	}
+}
+
 func TestExecuteAuthLoginCommandRejectsDesktopAccountWithoutItem(t *testing.T) {
 	err := execute(context.Background(), []string{
 		"--auth-store", filepath.Join(t.TempDir(), "accounts.json"),
