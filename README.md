@@ -1,19 +1,12 @@
 # stake-cli
 
-`stake-cli` is a focused Go project for working with [Stake](https://hellostake.com) session-token-backed accounts.
-
-It exposes two binaries:
-
-- `stake-cli`, a command-line client that talks directly to the Stake API using locally stored session tokens
-- `stake-api-server`, a local proxy that keeps stored sessions warm, serves account metadata, and proxies requests through those sessions
+`stake-cli` is a command-line client for working with [Stake](https://hellostake.com) session-token-backed accounts.
 
 ## Features
 
 - XDG-backed local auth store
 - Direct CLI access to Stake using stored session tokens
 - Browser-first login with optional 1Password-backed credential and MFA entry
-- Local proxy and read-only REST API for multi-account access
-- Background session keepalive to help short-lived tokens stay usable
 - Normalized ASX and US trades from Stake
 
 ## Library Usage
@@ -120,65 +113,4 @@ For testing, you can point the CLI at a different API base URL:
 
 ```bash
 ./dist/stake-cli --base-url http://127.0.0.1:18081 user primary
-```
-
-To run account operations through `stake-api-server` instead of talking to Stake directly, pass `--proxy`:
-
-```bash
-./dist/stake-cli --proxy http://127.0.0.1:8081 user primary
-./dist/stake-cli --proxy http://127.0.0.1:8081 trades primary
-```
-
-## Server
-
-`stake-api-server` reads the same auth store, periodically validates each stored token, and persists any refreshed token value it sees in response headers.
-
-For proxied Stake requests, send the local account name in `Stake-Session-Token` and the server will swap it for the current stored token for that account before forwarding the request upstream.
-
-```bash
-mise trust
-mise install
-mise run build
-
-./dist/stake-api-server --account primary
-```
-
-Proxy example:
-
-```bash
-curl \
-  -H "Stake-Session-Token: primary" \
-  http://127.0.0.1:8081/api/user
-```
-
-Or run directly:
-
-```bash
-mise run run -- --account primary
-```
-
-Useful server flags:
-
-- `--auth-store ~/.config/stake-cli/accounts.json`
-- `--account primary --account secondary`
-- `--listen 127.0.0.1:8081`
-- `--refresh-interval 15m`
-- `--shutdown-timeout 10s`
-
-## API
-
-- `ANY /api/...` proxied to Stake using `Stake-Session-Token: <stored-account-name>`
-- `GET /healthz`
-- `GET /v1/accounts`
-- `GET /v1/accounts/{account}`
-- `GET /v1/accounts/{account}/user`
-- `GET /v1/accounts/{account}/trades`
-
-Example:
-
-```bash
-curl -H "Stake-Session-Token: primary" http://127.0.0.1:8081/api/user
-curl http://127.0.0.1:8081/v1/accounts
-curl http://127.0.0.1:8081/v1/accounts/primary/user
-curl http://127.0.0.1:8081/v1/accounts/primary/trades
 ```

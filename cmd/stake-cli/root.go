@@ -14,15 +14,14 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/lox/stake-cli/internal/authstore"
-	"github.com/lox/stake-cli/internal/stakeapi"
 	"github.com/lox/stake-cli/internal/stakelogin"
 	"github.com/lox/stake-cli/pkg/stake"
+	"github.com/lox/stake-cli/pkg/types"
 )
 
 type cli struct {
 	AuthStore string        `help:"Path to the stored Stake auth file" type:"path"`
 	BaseURL   string        `help:"Base URL for the Stake API" default:"https://api2.prd.hellostake.com"`
-	ProxyURL  string        `help:"Proxy URL for stake-api-server" name:"proxy"`
 	Timeout   time.Duration `help:"HTTP timeout for requests" default:"30s"`
 
 	Auth   authCmd   `cmd:"" help:"Manage stored Stake auth"`
@@ -37,7 +36,6 @@ type runtime struct {
 	logger        *log.Logger
 	authStorePath string
 	baseURL       string
-	proxyURL      string
 	timeout       time.Duration
 }
 
@@ -74,7 +72,6 @@ func execute(ctx context.Context, args []string, stdout io.Writer, stderr io.Wri
 		logger:        log.New(stderr),
 		authStorePath: authStorePath,
 		baseURL:       cli.BaseURL,
-		proxyURL:      cli.ProxyURL,
 		timeout:       cli.Timeout,
 	}
 
@@ -128,13 +125,6 @@ func (r *runtime) stakeClient(name string, token string) *stake.Client {
 	}, r.logger)
 }
 
-func (r *runtime) proxyClient() *stakeapi.HTTPClient {
-	if r.proxyURL == "" {
-		return nil
-	}
-	return stakeapi.NewHTTPClient(r.proxyURL, nil)
-}
-
 type authAccountsResponse struct {
 	Accounts []authstore.View `json:"accounts"`
 }
@@ -146,6 +136,19 @@ type authAccountResponse struct {
 type authLoginResponse struct {
 	Login   stakelogin.Result `json:"login"`
 	Account authstore.View    `json:"account"`
+}
+
+type userResponse struct {
+	Account     string      `json:"account"`
+	ValidatedAt *time.Time  `json:"validated_at,omitempty"`
+	User        *stake.User `json:"user,omitempty"`
+}
+
+type tradesResponse struct {
+	Account   string         `json:"account"`
+	Count     int            `json:"count"`
+	FetchedAt time.Time      `json:"fetched_at"`
+	Trades    []*types.Trade `json:"trades"`
 }
 
 type authProbeResponse struct {
@@ -472,14 +475,6 @@ type userCmd struct {
 }
 
 func (c *userCmd) Run(runtime *runtime) error {
-	if client := runtime.proxyClient(); client != nil {
-		response, err := client.User(runtime.ctx, c.Account)
-		if err != nil {
-			return err
-		}
-		return writeOutput(runtime.stdout, response)
-	}
-
 	entry, err := runtime.storedAccount(c.Account)
 	if err != nil {
 		return err
@@ -506,7 +501,7 @@ func (c *userCmd) Run(runtime *runtime) error {
 		return err
 	}
 
-	return writeOutput(runtime.stdout, stakeapi.UserResponse{
+	return writeOutput(runtime.stdout, userResponse{
 		Account:     c.Account,
 		ValidatedAt: &validatedAt,
 		User:        user,
@@ -518,14 +513,6 @@ type tradesCmd struct {
 }
 
 func (c *tradesCmd) Run(runtime *runtime) error {
-	if client := runtime.proxyClient(); client != nil {
-		response, err := client.Trades(runtime.ctx, c.Account)
-		if err != nil {
-			return err
-		}
-		return writeOutput(runtime.stdout, response)
-	}
-
 	entry, err := runtime.storedAccount(c.Account)
 	if err != nil {
 		return err
@@ -548,7 +535,7 @@ func (c *tradesCmd) Run(runtime *runtime) error {
 		return err
 	}
 
-	return writeOutput(runtime.stdout, stakeapi.TradesResponse{
+	return writeOutput(runtime.stdout, tradesResponse{
 		Account:   c.Account,
 		Count:     len(trades),
 		FetchedAt: fetchedAt,
