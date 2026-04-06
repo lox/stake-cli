@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	"github.com/lox/stake-cli/internal/authstore"
 	"github.com/lox/stake-cli/internal/stakelogin"
+	"github.com/lox/stake-cli/pkg/sessionstore"
 	"github.com/lox/stake-cli/pkg/stake"
 )
 
@@ -53,7 +53,7 @@ func TestExecuteAuthAddCommand(t *testing.T) {
 		t.Fatalf("expected primary account, got %q", response.Account.Name)
 	}
 
-	store, err := authstore.Load(storePath)
+	store, err := sessionstore.Load(storePath)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
@@ -71,9 +71,9 @@ func TestExecuteAuthAddCommand(t *testing.T) {
 
 func TestExecuteUserCommandUsesStoredAuth(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
-	store := &authstore.File{}
-	store.Upsert(authstore.Entry{Name: "primary", SessionToken: "stored-token"})
-	if err := authstore.Save(storePath, store); err != nil {
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "primary", SessionToken: "stored-token"})
+	if err := sessionstore.Save(storePath, store); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
@@ -120,11 +120,65 @@ func TestExecuteUserCommandUsesStoredAuth(t *testing.T) {
 	}
 }
 
+func TestExecuteUserCommandPreservesConcurrentStoreUpdates(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{
+		Name:         "primary",
+		SessionToken: "stored-token",
+		OPItem:       "op://Private/old",
+		OPAccount:    "old.1password.com",
+	})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := sessionstore.Update(storePath, func(store *sessionstore.File) error {
+			entry, err := store.Get("primary")
+			if err != nil {
+				return err
+			}
+			entry.OPItem = "op://Private/new"
+			entry.OPAccount = "new.1password.com"
+			store.Upsert(*entry)
+			return nil
+		}); err != nil {
+			t.Fatalf("Update returned error: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-123", Email: "account@example.test", Username: "sample-user", AccountType: "individual"}); err != nil {
+			t.Fatalf("encoding response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "user", "primary"}, io.Discard, &bytes.Buffer{}); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	updatedStore, err := sessionstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	entry, err := updatedStore.Get("primary")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if entry.OPItem != "op://Private/new" {
+		t.Fatalf("expected concurrent OP item update to persist, got %q", entry.OPItem)
+	}
+	if entry.OPAccount != "new.1password.com" {
+		t.Fatalf("expected concurrent OP account update to persist, got %q", entry.OPAccount)
+	}
+}
+
 func TestExecuteAuthProbeCommandReportsRotationAndFailure(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
-	store := &authstore.File{}
-	store.Upsert(authstore.Entry{Name: "primary", SessionToken: "initial-token"})
-	if err := authstore.Save(storePath, store); err != nil {
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "primary", SessionToken: "initial-token"})
+	if err := sessionstore.Save(storePath, store); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
@@ -195,7 +249,7 @@ func TestExecuteAuthProbeCommandReportsRotationAndFailure(t *testing.T) {
 		t.Fatalf("expected last successful user payload, got %+v", response.User)
 	}
 
-	updatedStore, err := authstore.Load(storePath)
+	updatedStore, err := sessionstore.Load(storePath)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
@@ -213,9 +267,9 @@ func TestExecuteAuthProbeCommandReportsRotationAndFailure(t *testing.T) {
 
 func TestExecuteAuthLoginCommandDelegatesToScaffold(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
-	store := &authstore.File{}
-	store.Upsert(authstore.Entry{Name: "personal", SessionToken: "previous-token", UserID: "stored-user-id"})
-	if err := authstore.Save(storePath, store); err != nil {
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "personal", SessionToken: "previous-token", UserID: "stored-user-id"})
+	if err := sessionstore.Save(storePath, store); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
@@ -308,7 +362,7 @@ func TestExecuteAuthLoginCommandDelegatesToScaffold(t *testing.T) {
 		t.Fatalf("expected stored email account@example.test, got %q", response.Account.Email)
 	}
 
-	store, err := authstore.Load(storePath)
+	store, err := sessionstore.Load(storePath)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
@@ -403,14 +457,14 @@ func TestExecuteAuthLoginCommandPassesOnePasswordDesktopAccountConfig(t *testing
 
 func TestExecuteAuthLoginCommandUsesStoredOnePasswordConfig(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
-	store := &authstore.File{}
-	store.Upsert(authstore.Entry{
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{
 		Name:      "personal",
 		UserID:    "stored-user-id",
 		OPItem:    "op://Private/stake.com",
 		OPAccount: "my.1password.com",
 	})
-	if err := authstore.Save(storePath, store); err != nil {
+	if err := sessionstore.Save(storePath, store); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
 
@@ -495,7 +549,7 @@ func TestExecuteAuthLoginCommandStoresOnePasswordConfig(t *testing.T) {
 		t.Fatalf("execute returned error: %v", err)
 	}
 
-	store, err := authstore.Load(storePath)
+	store, err := sessionstore.Load(storePath)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
@@ -508,6 +562,157 @@ func TestExecuteAuthLoginCommandStoresOnePasswordConfig(t *testing.T) {
 	}
 	if entry.OPAccount != "my.1password.com" {
 		t.Fatalf("expected stored op account, got %q", entry.OPAccount)
+	}
+}
+
+func TestExecuteAuthTokenCommandPrintsRawToken(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "primary", SessionToken: "stored-token"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "auth", "token", "primary"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if got := stdout.String(); got != "stored-token\n" {
+		t.Fatalf("expected raw token output, got %q", got)
+	}
+}
+
+func TestExecuteAuthTokenCommandOutputsJSON(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	updatedAt := time.Date(2026, 4, 6, 3, 4, 5, 0, time.UTC)
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{
+		Name:         "primary",
+		SessionToken: "stored-token",
+		UserID:       "user-123",
+		Email:        "account@example.test",
+		Username:     "sample-user",
+		AccountType:  "individual",
+		UpdatedAt:    updatedAt,
+	})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "auth", "token", "primary", "--json"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	var response sessionstore.TokenView
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if response.Name != "primary" {
+		t.Fatalf("expected primary account, got %q", response.Name)
+	}
+	if response.SessionToken != "stored-token" {
+		t.Fatalf("expected stored-token, got %q", response.SessionToken)
+	}
+	if response.Email != "account@example.test" {
+		t.Fatalf("expected account@example.test, got %q", response.Email)
+	}
+	if !response.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("expected updated_at %s, got %s", updatedAt, response.UpdatedAt)
+	}
+}
+
+func TestExecuteAuthAddCommandRejectsBlankName(t *testing.T) {
+	serverCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	err := execute(context.Background(), []string{
+		"--auth-store", filepath.Join(t.TempDir(), "accounts.json"),
+		"--base-url", server.URL,
+		"auth", "add", "   ",
+		"--token", "initial-token",
+	}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected execute to fail for a blank account name")
+	}
+	if !strings.Contains(err.Error(), "account name is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if serverCalled {
+		t.Fatal("expected blank account name to fail before any API call")
+	}
+}
+
+func TestExecuteTradesCommandPreservesConcurrentStoreUpdates(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{
+		Name:         "primary",
+		SessionToken: "stored-token",
+		OPItem:       "op://Private/old",
+		OPAccount:    "old.1password.com",
+	})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/user":
+			if err := sessionstore.Update(storePath, func(store *sessionstore.File) error {
+				entry, err := store.Get("primary")
+				if err != nil {
+					return err
+				}
+				entry.OPItem = "op://Private/new"
+				entry.OPAccount = "new.1password.com"
+				store.Upsert(*entry)
+				return nil
+			}); err != nil {
+				t.Fatalf("Update returned error: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-123", Email: "account@example.test", Username: "sample-user", AccountType: "individual"}); err != nil {
+				t.Fatalf("encoding response: %v", err)
+			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/asx/orders/tradeActivity"):
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "hasNext": false, "page": 0, "totalItems": 0}); err != nil {
+				t.Fatalf("encoding ASX response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/api/users/accounts/accountTransactions":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+				t.Fatalf("encoding US response: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "trades", "primary"}, io.Discard, &bytes.Buffer{}); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	updatedStore, err := sessionstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	entry, err := updatedStore.Get("primary")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if entry.OPItem != "op://Private/new" {
+		t.Fatalf("expected concurrent OP item update to persist, got %q", entry.OPItem)
+	}
+	if entry.OPAccount != "new.1password.com" {
+		t.Fatalf("expected concurrent OP account update to persist, got %q", entry.OPAccount)
 	}
 }
 

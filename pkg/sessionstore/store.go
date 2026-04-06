@@ -1,4 +1,4 @@
-package authstore
+package sessionstore
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// ErrAccountNotFound is returned when the auth store does not contain an account.
+// ErrAccountNotFound is returned when the session store does not contain an account.
 var ErrAccountNotFound = errors.New("stored account not found")
 
 // Entry is one saved Stake account record.
@@ -37,7 +37,18 @@ type View struct {
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
-// File is the persisted auth store document.
+// TokenView exposes one stored account including the active session token.
+type TokenView struct {
+	Name         string    `json:"name"`
+	SessionToken string    `json:"session_token"`
+	UserID       string    `json:"user_id,omitempty"`
+	Email        string    `json:"email,omitempty"`
+	Username     string    `json:"username,omitempty"`
+	AccountType  string    `json:"account_type,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+}
+
+// File is the persisted session store document.
 type File struct {
 	Accounts []Entry `json:"accounts"`
 }
@@ -56,7 +67,7 @@ func ResolvePath(path string) (string, error) {
 	return filepath.Join(configDir, "stake-cli", "accounts.json"), nil
 }
 
-// Load reads the auth store from disk. Missing stores return an empty document.
+// Load reads the session store from disk. Missing stores return an empty document.
 func Load(path string) (*File, error) {
 	resolved, err := ResolvePath(path)
 	if err != nil {
@@ -68,22 +79,22 @@ func Load(path string) (*File, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return &File{}, nil
 		}
-		return nil, fmt.Errorf("read auth store: %w", err)
+		return nil, fmt.Errorf("read session store: %w", err)
 	}
 
 	var store File
 	if err := json.Unmarshal(data, &store); err != nil {
-		return nil, fmt.Errorf("parse auth store: %w", err)
+		return nil, fmt.Errorf("parse session store: %w", err)
 	}
 	store.sortAccounts()
 
 	return &store, nil
 }
 
-// Save writes the auth store to disk.
+// Save writes the session store to disk.
 func Save(path string, store *File) error {
 	if store == nil {
-		return fmt.Errorf("auth store is required")
+		return fmt.Errorf("session store is required")
 	}
 
 	resolved, err := ResolvePath(path)
@@ -98,18 +109,18 @@ func Save(path string, store *File) error {
 
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode auth store: %w", err)
+		return fmt.Errorf("encode session store: %w", err)
 	}
 	data = append(data, '\n')
 
 	dir := filepath.Dir(resolved)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create auth store dir: %w", err)
+		return fmt.Errorf("create session store dir: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(dir, filepath.Base(resolved)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp auth store: %w", err)
+		return fmt.Errorf("create temp session store: %w", err)
 	}
 	tmpName := tmp.Name()
 	cleanup := func() {
@@ -119,26 +130,26 @@ func Save(path string, store *File) error {
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("write temp auth store: %w", err)
+		return fmt.Errorf("write temp session store: %w", err)
 	}
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return fmt.Errorf("chmod temp auth store: %w", err)
+		return fmt.Errorf("chmod temp session store: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
-		return fmt.Errorf("close temp auth store: %w", err)
+		return fmt.Errorf("close temp session store: %w", err)
 	}
 	if err := os.Rename(tmpName, resolved); err != nil {
 		cleanup()
-		return fmt.Errorf("replace auth store: %w", err)
+		return fmt.Errorf("replace session store: %w", err)
 	}
 
 	return nil
 }
 
-// Update loads, mutates, and saves the auth store atomically.
+// Update loads, mutates, and saves the session store using an atomic file replace on save.
 func Update(path string, update func(store *File) error) error {
 	store, err := Load(path)
 	if err != nil {
@@ -152,6 +163,7 @@ func Update(path string, update func(store *File) error) error {
 
 // Get returns one stored account by name.
 func (f *File) Get(name string) (*Entry, error) {
+	name = normalizeName(name)
 	for i := range f.Accounts {
 		if f.Accounts[i].Name == name {
 			entry := f.Accounts[i]
@@ -182,6 +194,7 @@ func (f *File) Upsert(entry Entry) {
 
 // Delete removes one stored account. It returns true when an account was removed.
 func (f *File) Delete(name string) bool {
+	name = normalizeName(name)
 	for i := range f.Accounts {
 		if f.Accounts[i].Name == name {
 			f.Accounts = append(f.Accounts[:i], f.Accounts[i+1:]...)
@@ -212,6 +225,19 @@ func (e Entry) View() View {
 	}
 }
 
+// TokenView returns one stored account including its active session token.
+func (e Entry) TokenView() TokenView {
+	return TokenView{
+		Name:         e.Name,
+		SessionToken: e.SessionToken,
+		UserID:       e.UserID,
+		Email:        e.Email,
+		Username:     e.Username,
+		AccountType:  e.AccountType,
+		UpdatedAt:    e.UpdatedAt,
+	}
+}
+
 func (f *File) sortAccounts() {
 	sort.Slice(f.Accounts, func(i, j int) bool {
 		return f.Accounts[i].Name < f.Accounts[j].Name
@@ -219,7 +245,7 @@ func (f *File) sortAccounts() {
 }
 
 func (e *Entry) normalize() {
-	e.Name = strings.TrimSpace(e.Name)
+	e.Name = normalizeName(e.Name)
 	e.SessionToken = strings.TrimSpace(e.SessionToken)
 	e.UserID = strings.TrimSpace(e.UserID)
 	e.OPItem = strings.TrimSpace(e.OPItem)
@@ -230,4 +256,8 @@ func (e *Entry) normalize() {
 	if !e.UpdatedAt.IsZero() {
 		e.UpdatedAt = e.UpdatedAt.UTC()
 	}
+}
+
+func normalizeName(name string) string {
+	return strings.TrimSpace(name)
 }

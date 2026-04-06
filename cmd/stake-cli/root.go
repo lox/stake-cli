@@ -13,16 +13,16 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/charmbracelet/log"
 
-	"github.com/lox/stake-cli/internal/authstore"
 	"github.com/lox/stake-cli/internal/stakelogin"
+	"github.com/lox/stake-cli/pkg/sessionstore"
 	"github.com/lox/stake-cli/pkg/stake"
 	"github.com/lox/stake-cli/pkg/types"
 )
 
 type cli struct {
-	AuthStore string        `help:"Path to the stored Stake auth file" type:"path"`
-	BaseURL   string        `help:"Base URL for the Stake API" default:"https://api2.prd.hellostake.com"`
-	Timeout   time.Duration `help:"HTTP timeout for requests" default:"30s"`
+	AuthStore string           `help:"Path to the stored Stake auth file" type:"path"`
+	BaseURL   string           `help:"Base URL for the Stake API" default:"https://api2.prd.hellostake.com"`
+	Timeout   time.Duration    `help:"HTTP timeout for requests" default:"30s"`
 	Version   kong.VersionFlag `name:"version" help:"Print version information and quit"`
 
 	Auth   authCmd   `cmd:"" help:"Manage stored Stake auth"`
@@ -64,7 +64,7 @@ func execute(ctx context.Context, args []string, stdout io.Writer, stderr io.Wri
 		return err
 	}
 
-	authStorePath, err := authstore.ResolvePath(cli.AuthStore)
+	authStorePath, err := sessionstore.ResolvePath(cli.AuthStore)
 	if err != nil {
 		return err
 	}
@@ -95,8 +95,8 @@ func writeOutput(w io.Writer, value interface{}) error {
 	return nil
 }
 
-func (r *runtime) storedAccount(name string) (*authstore.Entry, error) {
-	store, err := authstore.Load(r.authStorePath)
+func (r *runtime) storedAccount(name string) (*sessionstore.Entry, error) {
+	store, err := sessionstore.Load(r.authStorePath)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (r *runtime) stakeClient(name string, token string) *stake.Client {
 		Timeout:      r.timeout,
 		SessionToken: token,
 		OnSessionToken: func(refreshed string) {
-			if err := authstore.Update(r.authStorePath, func(store *authstore.File) error {
+			if err := sessionstore.Update(r.authStorePath, func(store *sessionstore.File) error {
 				entry, err := store.Get(name)
 				if err != nil {
 					return err
@@ -130,16 +130,16 @@ func (r *runtime) stakeClient(name string, token string) *stake.Client {
 }
 
 type authAccountsResponse struct {
-	Accounts []authstore.View `json:"accounts"`
+	Accounts []sessionstore.View `json:"accounts"`
 }
 
 type authAccountResponse struct {
-	Account authstore.View `json:"account"`
+	Account sessionstore.View `json:"account"`
 }
 
 type authLoginResponse struct {
 	Login   stakelogin.Result `json:"login"`
-	Account authstore.View    `json:"account"`
+	Account sessionstore.View `json:"account"`
 }
 
 type userResponse struct {
@@ -176,6 +176,7 @@ type authCmd struct {
 	List   authListCmd   `cmd:"" help:"List stored auth entries"`
 	Probe  authProbeCmd  `cmd:"" help:"Repeatedly validate a stored session until it fails or you stop the command"`
 	Remove authRemoveCmd `cmd:"" help:"Remove a stored auth entry"`
+	Token  authTokenCmd  `cmd:"" help:"Print a stored session token"`
 }
 
 type authAddCmd struct {
@@ -246,7 +247,7 @@ func (c *authLoginCmd) onePasswordConfig(runtime *runtime) (stakelogin.OnePasswo
 	desktopAccount := strings.TrimSpace(c.OPAccount)
 	if itemReference == "" || desktopAccount == "" {
 		entry, err := runtime.storedAccount(c.Name)
-		if err != nil && !errors.Is(err, authstore.ErrAccountNotFound) {
+		if err != nil && !errors.Is(err, sessionstore.ErrAccountNotFound) {
 			return stakelogin.OnePasswordConfig{}, err
 		}
 		if err == nil {
@@ -279,7 +280,7 @@ func (c *authLoginCmd) onePasswordConfig(runtime *runtime) (stakelogin.OnePasswo
 func (r *runtime) expectedLoginUserID(name string) (string, error) {
 	entry, err := r.storedAccount(name)
 	if err != nil {
-		if errors.Is(err, authstore.ErrAccountNotFound) {
+		if errors.Is(err, sessionstore.ErrAccountNotFound) {
 			return "", nil
 		}
 		return "", err
@@ -288,10 +289,15 @@ func (r *runtime) expectedLoginUserID(name string) (string, error) {
 	return strings.TrimSpace(entry.UserID), nil
 }
 
-func (r *runtime) validateAndStoreAccount(name string, token string, onePassword *stakelogin.OnePasswordConfig) (authstore.View, error) {
+func (r *runtime) validateAndStoreAccount(name string, token string, onePassword *stakelogin.OnePasswordConfig) (sessionstore.View, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return sessionstore.View{}, fmt.Errorf("account name is required")
+	}
+
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return authstore.View{}, fmt.Errorf("stake session token is required")
+		return sessionstore.View{}, fmt.Errorf("stake session token is required")
 	}
 
 	client := stake.NewClient(stake.Config{
@@ -302,10 +308,10 @@ func (r *runtime) validateAndStoreAccount(name string, token string, onePassword
 
 	user, err := client.ValidateSession(r.ctx)
 	if err != nil {
-		return authstore.View{}, err
+		return sessionstore.View{}, err
 	}
 
-	entry := authstore.Entry{
+	entry := sessionstore.Entry{
 		Name:         name,
 		SessionToken: client.SessionToken(),
 		UserID:       user.UserID,
@@ -318,9 +324,9 @@ func (r *runtime) validateAndStoreAccount(name string, token string, onePassword
 		entry.OPItem = strings.TrimSpace(onePassword.ItemReference)
 		entry.OPAccount = strings.TrimSpace(onePassword.DesktopAccount)
 	}
-	if err := authstore.Update(r.authStorePath, func(store *authstore.File) error {
+	if err := sessionstore.Update(r.authStorePath, func(store *sessionstore.File) error {
 		stored, err := store.Get(name)
-		if err != nil && !errors.Is(err, authstore.ErrAccountNotFound) {
+		if err != nil && !errors.Is(err, sessionstore.ErrAccountNotFound) {
 			return err
 		}
 		if err == nil {
@@ -334,7 +340,7 @@ func (r *runtime) validateAndStoreAccount(name string, token string, onePassword
 		store.Upsert(entry)
 		return nil
 	}); err != nil {
-		return authstore.View{}, err
+		return sessionstore.View{}, err
 	}
 
 	return entry.View(), nil
@@ -343,11 +349,30 @@ func (r *runtime) validateAndStoreAccount(name string, token string, onePassword
 type authListCmd struct{}
 
 func (c *authListCmd) Run(runtime *runtime) error {
-	store, err := authstore.Load(runtime.authStorePath)
+	store, err := sessionstore.Load(runtime.authStorePath)
 	if err != nil {
 		return err
 	}
 	return writeOutput(runtime.stdout, authAccountsResponse{Accounts: store.Views()})
+}
+
+type authTokenCmd struct {
+	Name string `arg:"" name:"name" help:"Local account name"`
+	JSON bool   `help:"Output structured JSON instead of the raw session token"`
+}
+
+func (c *authTokenCmd) Run(runtime *runtime) error {
+	entry, err := runtime.storedAccount(c.Name)
+	if err != nil {
+		return err
+	}
+
+	if !c.JSON {
+		_, err := fmt.Fprintln(runtime.stdout, entry.SessionToken)
+		return err
+	}
+
+	return writeOutput(runtime.stdout, entry.TokenView())
 }
 
 type authRemoveCmd struct {
@@ -355,9 +380,9 @@ type authRemoveCmd struct {
 }
 
 func (c *authRemoveCmd) Run(runtime *runtime) error {
-	return authstore.Update(runtime.authStorePath, func(store *authstore.File) error {
+	return sessionstore.Update(runtime.authStorePath, func(store *sessionstore.File) error {
 		if !store.Delete(c.Name) {
-			return authstore.ErrAccountNotFound
+			return sessionstore.ErrAccountNotFound
 		}
 		return nil
 	})
@@ -429,7 +454,7 @@ func (c *authProbeCmd) Run(runtime *runtime) error {
 			runtime.logger.Info("Stake session token rotated during probe", "account", c.Name, "attempt", attempt)
 		}
 
-		if err := authstore.Update(runtime.authStorePath, func(store *authstore.File) error {
+		if err := sessionstore.Update(runtime.authStorePath, func(store *sessionstore.File) error {
 			updated, err := store.Get(c.Name)
 			if err != nil {
 				return err
@@ -491,15 +516,18 @@ func (c *userCmd) Run(runtime *runtime) error {
 	}
 	validatedAt := time.Now().UTC()
 
-	if err := authstore.Update(runtime.authStorePath, func(store *authstore.File) error {
-		updated := *entry
+	if err := sessionstore.Update(runtime.authStorePath, func(store *sessionstore.File) error {
+		updated, err := store.Get(c.Account)
+		if err != nil {
+			return err
+		}
 		updated.SessionToken = client.SessionToken()
 		updated.UserID = user.UserID
 		updated.Email = user.Email
 		updated.Username = user.Username
 		updated.AccountType = user.AccountType
 		updated.UpdatedAt = validatedAt
-		store.Upsert(updated)
+		store.Upsert(*updated)
 		return nil
 	}); err != nil {
 		return err
@@ -529,11 +557,14 @@ func (c *tradesCmd) Run(runtime *runtime) error {
 	}
 	fetchedAt := time.Now().UTC()
 
-	if err := authstore.Update(runtime.authStorePath, func(store *authstore.File) error {
-		updated := *entry
+	if err := sessionstore.Update(runtime.authStorePath, func(store *sessionstore.File) error {
+		updated, err := store.Get(c.Account)
+		if err != nil {
+			return err
+		}
 		updated.SessionToken = client.SessionToken()
 		updated.UpdatedAt = fetchedAt
-		store.Upsert(updated)
+		store.Upsert(*updated)
 		return nil
 	}); err != nil {
 		return err
