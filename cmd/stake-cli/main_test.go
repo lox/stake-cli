@@ -566,3 +566,32 @@ func TestExecuteAuthLoginCommandRejectsDesktopAccountWithoutItem(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestExecuteVersionFlagPrintsVersion(t *testing.T) {
+	originalVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() {
+		version = originalVersion
+	})
+
+	originalCLIExit := cliExit
+	var exitCode int
+	cliExit = func(code int) {
+		exitCode = code
+	}
+	t.Cleanup(func() {
+		cliExit = originalCLIExit
+	})
+
+	var stdout bytes.Buffer
+	err := execute(context.Background(), []string{"--version"}, &stdout, io.Discard)
+	if err == nil {
+		t.Fatal("expected execute to stop after printing version")
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected zero exit code, got %d", exitCode)
+	}
+	if got := stdout.String(); got != "v1.2.3\n" {
+		t.Fatalf("expected version output, got %q", got)
+	}
+}
