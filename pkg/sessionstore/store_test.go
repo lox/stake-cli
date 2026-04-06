@@ -1,4 +1,4 @@
-package authstore
+package sessionstore
 
 import (
 	"path/filepath"

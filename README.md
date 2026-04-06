@@ -11,10 +11,11 @@
 
 ## Library Usage
 
-The direct Stake client is publicly importable for other tools and libraries:
+The direct Stake client and stored-session package are publicly importable for other tools and libraries:
 
 ```go
 import "github.com/lox/stake-cli/pkg/stake"
+import "github.com/lox/stake-cli/pkg/sessionstore"
 ```
 
 ## Auth Setup
@@ -94,9 +95,13 @@ Useful auth commands:
 
 ```bash
 ./dist/stake-cli auth list
+./dist/stake-cli auth token primary
+./dist/stake-cli auth token primary --json
 ./dist/stake-cli auth probe primary --interval 30s
 ./dist/stake-cli auth remove primary
 ```
+
+`auth token` prints the raw session token by default for shell use. Add `--json` to include stored metadata such as `user_id`, `email`, `account_type`, and `updated_at` alongside the token.
 
 `auth probe` keeps validating one stored session until it fails, you interrupt it, or `--max-attempts` is reached. Each probe result is logged to stderr, and the final JSON summary on stdout records how long the token survived, whether Stake rotated it, and the last validation error.
 
