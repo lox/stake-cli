@@ -24,6 +24,7 @@ type cli struct {
 	BaseURL   string        `help:"Base URL for the Stake API" default:"https://api2.prd.hellostake.com"`
 	ProxyURL  string        `help:"Proxy URL for stake-api-server" name:"proxy"`
 	Timeout   time.Duration `help:"HTTP timeout for requests" default:"30s"`
+	Version   kong.VersionFlag `name:"version" help:"Print version information and quit"`
 
 	Auth   authCmd   `cmd:"" help:"Manage stored Stake auth"`
 	User   userCmd   `cmd:"" help:"Validate a stored session and print the live user payload"`
@@ -43,6 +44,7 @@ type runtime struct {
 
 var runStakeLogin = stakelogin.Run
 var cliInput io.Reader = os.Stdin
+var cliExit = os.Exit
 
 func execute(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) error {
 	cli := cli{}
@@ -50,7 +52,9 @@ func execute(ctx context.Context, args []string, stdout io.Writer, stderr io.Wri
 		&cli,
 		kong.Name("stake-cli"),
 		kong.Description("CLI client for Stake accounts backed by stored session tokens"),
+		kong.Exit(cliExit),
 		kong.UsageOnError(),
+		kong.Vars{"version": version},
 		kong.Writers(stdout, stderr),
 	)
 	if err != nil {
