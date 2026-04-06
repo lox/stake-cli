@@ -290,6 +290,11 @@ func (r *runtime) expectedLoginUserID(name string) (string, error) {
 }
 
 func (r *runtime) validateAndStoreAccount(name string, token string, onePassword *stakelogin.OnePasswordConfig) (sessionstore.View, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return sessionstore.View{}, fmt.Errorf("account name is required")
+	}
+
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return sessionstore.View{}, fmt.Errorf("stake session token is required")
@@ -512,14 +517,17 @@ func (c *userCmd) Run(runtime *runtime) error {
 	validatedAt := time.Now().UTC()
 
 	if err := sessionstore.Update(runtime.authStorePath, func(store *sessionstore.File) error {
-		updated := *entry
+		updated, err := store.Get(c.Account)
+		if err != nil {
+			return err
+		}
 		updated.SessionToken = client.SessionToken()
 		updated.UserID = user.UserID
 		updated.Email = user.Email
 		updated.Username = user.Username
 		updated.AccountType = user.AccountType
 		updated.UpdatedAt = validatedAt
-		store.Upsert(updated)
+		store.Upsert(*updated)
 		return nil
 	}); err != nil {
 		return err
@@ -550,10 +558,13 @@ func (c *tradesCmd) Run(runtime *runtime) error {
 	fetchedAt := time.Now().UTC()
 
 	if err := sessionstore.Update(runtime.authStorePath, func(store *sessionstore.File) error {
-		updated := *entry
+		updated, err := store.Get(c.Account)
+		if err != nil {
+			return err
+		}
 		updated.SessionToken = client.SessionToken()
 		updated.UpdatedAt = fetchedAt
-		store.Upsert(updated)
+		store.Upsert(*updated)
 		return nil
 	}); err != nil {
 		return err

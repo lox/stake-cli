@@ -80,3 +80,23 @@ func TestUpdateReplacesExistingAccount(t *testing.T) {
 		t.Fatalf("expected updated email, got %q", entry.Email)
 	}
 }
+
+func TestGetAndDeleteNormalizeNames(t *testing.T) {
+	store := &File{}
+	store.Upsert(Entry{Name: " primary ", SessionToken: "token-1"})
+
+	entry, err := store.Get(" primary ")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if entry.Name != "primary" {
+		t.Fatalf("expected normalized name, got %q", entry.Name)
+	}
+
+	if !store.Delete(" primary ") {
+		t.Fatal("expected Delete to remove normalized name")
+	}
+	if len(store.Accounts) != 0 {
+		t.Fatalf("expected store to be empty, got %d accounts", len(store.Accounts))
+	}
+}

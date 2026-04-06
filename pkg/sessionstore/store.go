@@ -149,7 +149,7 @@ func Save(path string, store *File) error {
 	return nil
 }
 
-// Update loads, mutates, and saves the session store atomically.
+// Update loads, mutates, and saves the session store using an atomic file replace on save.
 func Update(path string, update func(store *File) error) error {
 	store, err := Load(path)
 	if err != nil {
@@ -163,6 +163,7 @@ func Update(path string, update func(store *File) error) error {
 
 // Get returns one stored account by name.
 func (f *File) Get(name string) (*Entry, error) {
+	name = normalizeName(name)
 	for i := range f.Accounts {
 		if f.Accounts[i].Name == name {
 			entry := f.Accounts[i]
@@ -193,6 +194,7 @@ func (f *File) Upsert(entry Entry) {
 
 // Delete removes one stored account. It returns true when an account was removed.
 func (f *File) Delete(name string) bool {
+	name = normalizeName(name)
 	for i := range f.Accounts {
 		if f.Accounts[i].Name == name {
 			f.Accounts = append(f.Accounts[:i], f.Accounts[i+1:]...)
@@ -243,7 +245,7 @@ func (f *File) sortAccounts() {
 }
 
 func (e *Entry) normalize() {
-	e.Name = strings.TrimSpace(e.Name)
+	e.Name = normalizeName(e.Name)
 	e.SessionToken = strings.TrimSpace(e.SessionToken)
 	e.UserID = strings.TrimSpace(e.UserID)
 	e.OPItem = strings.TrimSpace(e.OPItem)
@@ -254,4 +256,8 @@ func (e *Entry) normalize() {
 	if !e.UpdatedAt.IsZero() {
 		e.UpdatedAt = e.UpdatedAt.UTC()
 	}
+}
+
+func normalizeName(name string) string {
+	return strings.TrimSpace(name)
 }
