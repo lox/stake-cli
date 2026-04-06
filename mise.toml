@@ -22,6 +22,14 @@ run = "golangci-lint run"
 description = "Run all checks (build, test, lint)"
 depends = ["build", "test", "lint"]
 
+[tasks."install:global"]
+description = "Install stake-cli into ~/bin"
+depends = ["build"]
+run = [
+  "mkdir -p \"$HOME/bin\"",
+  "install -m 755 dist/stake-cli \"$HOME/bin/stake-cli\"",
+]
+
 [tasks.tidy]
 description = "Tidy Go modules"
 run = "go mod tidy"
