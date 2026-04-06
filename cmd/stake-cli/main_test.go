@@ -365,3 +365,94 @@ func TestExecuteAuthLoginCommandDelegatesToScaffold(t *testing.T) {
 		t.Fatalf("expected stored email account@example.test, got %q", entry.Email)
 	}
 }
+
+func TestExecuteAuthLoginCommandPassesOnePasswordServiceAccountConfig(t *testing.T) {
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "service-account-token")
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{
+			Account: cfg.AccountName,
+			Status:  "manual_login_pending",
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", filepath.Join(t.TempDir(), "accounts.json"),
+		"auth", "login", "personal",
+		"--op-item", "op://stake/personal",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.OnePassword.ItemReference != "op://stake/personal" {
+		t.Fatalf("unexpected 1Password item reference: %q", capturedConfig.OnePassword.ItemReference)
+	}
+	if capturedConfig.OnePassword.ServiceAccountToken != "service-account-token" {
+		t.Fatalf("unexpected 1Password service account token: %q", capturedConfig.OnePassword.ServiceAccountToken)
+	}
+	if capturedConfig.OnePassword.DesktopAccount != "" {
+		t.Fatalf("expected empty desktop account, got %q", capturedConfig.OnePassword.DesktopAccount)
+	}
+}
+
+func TestExecuteAuthLoginCommandPassesOnePasswordDesktopAccountConfig(t *testing.T) {
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "service-account-token")
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{
+			Account: cfg.AccountName,
+			Status:  "manual_login_pending",
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", filepath.Join(t.TempDir(), "accounts.json"),
+		"auth", "login", "personal",
+		"--op-item", "op://stake/personal",
+		"--op-account", "Personal",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.OnePassword.ItemReference != "op://stake/personal" {
+		t.Fatalf("unexpected 1Password item reference: %q", capturedConfig.OnePassword.ItemReference)
+	}
+	if capturedConfig.OnePassword.DesktopAccount != "Personal" {
+		t.Fatalf("unexpected 1Password desktop account: %q", capturedConfig.OnePassword.DesktopAccount)
+	}
+	if capturedConfig.OnePassword.ServiceAccountToken != "" {
+		t.Fatalf("expected empty service account token, got %q", capturedConfig.OnePassword.ServiceAccountToken)
+	}
+}
+
+func TestExecuteAuthLoginCommandRejectsDesktopAccountWithoutItem(t *testing.T) {
+	err := execute(context.Background(), []string{
+		"--auth-store", filepath.Join(t.TempDir(), "accounts.json"),
+		"auth", "login", "personal",
+		"--op-account", "Personal",
+	}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected execute to fail without --op-item")
+	}
+	if !strings.Contains(err.Error(), "--op-account requires --op-item") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

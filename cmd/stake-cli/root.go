@@ -191,10 +191,16 @@ type authLoginCmd struct {
 	BrowserTimeout time.Duration `help:"Maximum time allowed for browser startup and initial navigation" default:"2m" name:"browser-timeout"`
 	Headless       bool          `help:"Run headless instead of opening a visible browser" name:"headless"`
 	AutoClose      bool          `help:"Close the browser after preparing the login page instead of leaving it open for manual auth" name:"auto-close"`
+	OPItem         string        `help:"1Password item reference used to autofill email, password, and MFA (op://vault/item)" name:"op-item"`
+	OPAccount      string        `help:"1Password desktop account to use instead of OP_SERVICE_ACCOUNT_TOKEN" name:"op-account"`
 }
 
 func (c *authLoginCmd) Run(runtime *runtime) error {
 	expectedUserID, err := runtime.expectedLoginUserID(c.Name)
+	if err != nil {
+		return err
+	}
+	onePassword, err := c.onePasswordConfig()
 	if err != nil {
 		return err
 	}
@@ -203,6 +209,7 @@ func (c *authLoginCmd) Run(runtime *runtime) error {
 		AccountName:    c.Name,
 		APIBaseURL:     runtime.baseURL,
 		ExpectedUserID: expectedUserID,
+		OnePassword:    onePassword,
 		LoginURL:       c.LoginURL,
 		BrowserTimeout: c.BrowserTimeout,
 		ShowBrowser:    !c.Headless,
@@ -225,6 +232,27 @@ func (c *authLoginCmd) Run(runtime *runtime) error {
 		Login:   *result,
 		Account: view,
 	})
+}
+
+func (c *authLoginCmd) onePasswordConfig() (stakelogin.OnePasswordConfig, error) {
+	itemReference := strings.TrimSpace(c.OPItem)
+	desktopAccount := strings.TrimSpace(c.OPAccount)
+	if itemReference == "" {
+		if desktopAccount != "" {
+			return stakelogin.OnePasswordConfig{}, fmt.Errorf("--op-account requires --op-item")
+		}
+		return stakelogin.OnePasswordConfig{}, nil
+	}
+
+	config := stakelogin.OnePasswordConfig{
+		ItemReference:  itemReference,
+		DesktopAccount: desktopAccount,
+	}
+	if config.DesktopAccount == "" {
+		config.ServiceAccountToken = strings.TrimSpace(os.Getenv("OP_SERVICE_ACCOUNT_TOKEN"))
+	}
+
+	return config, nil
 }
 
 func (r *runtime) expectedLoginUserID(name string) (string, error) {

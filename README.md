@@ -11,6 +11,7 @@ It exposes two binaries:
 
 - XDG-backed local auth store
 - Direct CLI access to Stake using stored session tokens
+- Browser-first login with optional 1Password-backed credential and MFA entry
 - Local proxy and read-only REST API for multi-account access
 - Background session keepalive to help short-lived tokens stay usable
 - Normalized ASX and US trades from Stake
@@ -37,6 +38,37 @@ That flow opens a visible browser at Stake's login page and lets you complete lo
 If the alias is new, the CLI waits for you to press Enter in the terminal before capturing `localStorage.sessionKey`.
 
 If the alias already exists in the auth store and has a known `user_id`, `auth login` watches for `sessionKey` automatically, validates the browser session, and switches it to that stored account before saving the token. That makes it safer to refresh non-default accounts such as trusts without manually switching in the UI first.
+
+You can also have `auth login` load credentials from 1Password and submit the Stake login form for you.
+
+Service-account auth:
+
+```bash
+export OP_SERVICE_ACCOUNT_TOKEN="ops_..."
+
+./dist/stake-cli auth login personal \
+  --op-item op://Private/stake.com
+```
+
+Desktop-app auth:
+
+```bash
+./dist/stake-cli auth login family-trust \
+  --op-item op://Private/stake.com \
+  --op-account my.1password.com
+```
+
+The 1Password-backed flow expects the item to expose Stake credentials through standard fields:
+
+- `username` for the email address
+- `password` for the password
+- a TOTP field for MFA when the account requires one
+
+The CLI first tries the common built-in TOTP field names, then falls back to scanning the item metadata so custom sections and generated OTP field IDs still work.
+
+The 1Password SDK reports the built-in Private vault as `Personal`. `stake-cli` accepts either vault name when resolving `op://vault/item`, so `op://Private/...` and `op://Personal/...` both work for the default personal vault.
+
+When 1Password automation is enabled, `stake-cli` fills the email and password fields, submits the Angular Material login UI, and enters MFA automatically if Stake prompts for it. If Stake briefly returns to `/auth/login` while the session is still settling, the CLI retries the automated sign-in and keeps waiting for a usable browser session token before saving anything.
 
 Stored auth defaults to:
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/go-rod/rod/lib/launcher/flags"
+	"github.com/lox/stake-cli/internal/onepassword"
 )
 
 func TestNewLauncherRespectsVisibilityAndLifetime(t *testing.T) {
@@ -168,6 +169,78 @@ func TestAlignSessionTokenToExpectedUserSwitchesAccount(t *testing.T) {
 	}
 }
 
+func TestAlignSessionTokenToExpectedUserWaitsForBrowserTokenAfterSwitch(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodGet {
+				t.Fatalf("expected GET request, got %s", r.Method)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]string{"userId": "default-user"}); err != nil {
+				t.Fatalf("encoding initial user response: %v", err)
+			}
+		case 2:
+			if r.Method != http.MethodPut {
+				t.Fatalf("expected PUT request, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case 3:
+			if r.Method != http.MethodGet {
+				t.Fatalf("expected GET request, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":401,"message":"HTTP 401 Unauthorized"}`))
+		default:
+			t.Fatalf("unexpected extra request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	_, _, err := alignSessionTokenToExpectedUser(context.Background(), Config{
+		AccountName:    "personal",
+		APIBaseURL:     server.URL,
+		ExpectedUserID: "target-user",
+		BrowserTimeout: 5 * time.Second,
+	}, log.New(io.Discard), "captured-token")
+	if !errors.Is(err, errSessionNotReady) {
+		t.Fatalf("expected errSessionNotReady, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "validate switched session token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAlignSessionTokenToExpectedUserWaitsWhenCurrentBrowserTokenIsUnauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/user" {
+			t.Fatalf("expected /api/user path, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"HTTP 401 Unauthorized"}`))
+	}))
+	defer server.Close()
+
+	_, _, err := alignSessionTokenToExpectedUser(context.Background(), Config{
+		AccountName:    "family-trust",
+		APIBaseURL:     server.URL,
+		ExpectedUserID: "target-user",
+		BrowserTimeout: 5 * time.Second,
+	}, log.New(io.Discard), "captured-token")
+	if !errors.Is(err, errSessionNotReady) {
+		t.Fatalf("expected errSessionNotReady, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "validate confirmed session token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestWaitForExpectedSessionCapturesAutomatically(t *testing.T) {
 	originalInterval := automaticCapturePollInterval
 	automaticCapturePollInterval = time.Millisecond
@@ -193,7 +266,7 @@ func TestWaitForExpectedSessionCapturesAutomatically(t *testing.T) {
 			}
 			return []string{"Confirmed browser session was switched to the stored Stake user_id before capture."}, "switched-token", nil
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("waitForExpectedSession returned error: %v", err)
 	}
@@ -228,7 +301,7 @@ func TestWaitForExpectedSessionReturnsTerminalError(t *testing.T) {
 		align: func(context.Context, string) ([]string, string, error) {
 			return nil, "", errors.New("switch failed")
 		},
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected terminal automatic capture error")
 	}
@@ -252,6 +325,73 @@ func TestNormalizeAndValidateAllowsAutomaticCaptureWithoutPromptInput(t *testing
 
 	if err := cfg.normalizeAndValidate(); err != nil {
 		t.Fatalf("normalizeAndValidate returned error: %v", err)
+	}
+}
+
+func TestNormalizeAndValidateAllowsOnePasswordAutomationWithoutPromptInput(t *testing.T) {
+	cfg := Config{
+		AccountName:    "family-trust",
+		LoginURL:       "https://trading.hellostake.com/auth/login",
+		BrowserTimeout: 5 * time.Second,
+		ShowBrowser:    true,
+		KeepBrowser:    true,
+		OnePassword: OnePasswordConfig{
+			ItemReference: "op://stake/family-trust",
+		},
+	}
+
+	if err := cfg.normalizeAndValidate(); err != nil {
+		t.Fatalf("normalizeAndValidate returned error: %v", err)
+	}
+}
+
+func TestConfiguredLoginCredentialsLoadsOnePasswordItem(t *testing.T) {
+	originalLoader := loadOnePasswordLoginCredentials
+	t.Cleanup(func() {
+		loadOnePasswordLoginCredentials = originalLoader
+	})
+
+	loadOnePasswordLoginCredentials = func(ctx context.Context, auth onepassword.AuthConfig, itemReference string) (onepassword.LoginCredentials, error) {
+		if ctx == nil {
+			t.Fatal("expected context to be forwarded")
+		}
+		if itemReference != "op://stake/family-trust" {
+			return onepassword.LoginCredentials{}, errors.New("unexpected item reference")
+		}
+		if auth.ServiceAccountToken != "service-account-token" {
+			return onepassword.LoginCredentials{}, errors.New("unexpected service account token")
+		}
+		if auth.DesktopAccount != "Personal" {
+			return onepassword.LoginCredentials{}, errors.New("unexpected desktop account")
+		}
+		return onepassword.LoginCredentials{
+			Email:    "lachlan@example.test",
+			Password: "super-secret",
+			MFACode:  "123456",
+		}, nil
+	}
+
+	credentials, err := configuredLoginCredentials(context.Background(), Config{
+		OnePassword: OnePasswordConfig{
+			ItemReference:       "op://stake/family-trust",
+			ServiceAccountToken: "service-account-token",
+			DesktopAccount:      "Personal",
+		},
+	})
+	if err != nil {
+		t.Fatalf("configuredLoginCredentials returned error: %v", err)
+	}
+	if credentials == nil {
+		t.Fatal("expected login credentials")
+	}
+	if credentials.Email != "lachlan@example.test" {
+		t.Fatalf("unexpected email: %q", credentials.Email)
+	}
+	if credentials.Password != "super-secret" {
+		t.Fatalf("unexpected password: %q", credentials.Password)
+	}
+	if credentials.MFACode != "123456" {
+		t.Fatalf("unexpected MFA code: %q", credentials.MFACode)
 	}
 }
 
