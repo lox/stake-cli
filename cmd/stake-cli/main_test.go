@@ -1607,6 +1607,56 @@ func TestExecuteAuthLoginCommandUsesStoredOnePasswordConfig(t *testing.T) {
 	}
 }
 
+func TestExecuteAuthLoginCommandUsesStoredOnePasswordConfigForUserIDAlias(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{
+		Name:      "user-12345678",
+		UserID:    "12345678-1234-1234-1234-123456789abc",
+		OPItem:    "op://Private/stake.com",
+		OPAccount: "my.1password.com",
+	})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{
+			Account: cfg.AccountName,
+			Status:  "manual_login_pending",
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"auth", "login", "--user-id", "12345678-1234-1234-1234-123456789abc",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.AccountName != "user-12345678" {
+		t.Fatalf("expected synthesized user account name, got %q", capturedConfig.AccountName)
+	}
+	if capturedConfig.ExpectedUserID != "12345678-1234-1234-1234-123456789abc" {
+		t.Fatalf("expected explicit user id to be forwarded, got %q", capturedConfig.ExpectedUserID)
+	}
+	if capturedConfig.OnePassword.ItemReference != "op://Private/stake.com" {
+		t.Fatalf("unexpected stored 1Password item reference: %q", capturedConfig.OnePassword.ItemReference)
+	}
+	if capturedConfig.OnePassword.DesktopAccount != "my.1password.com" {
+		t.Fatalf("unexpected stored 1Password desktop account: %q", capturedConfig.OnePassword.DesktopAccount)
+	}
+}
+
 func TestExecuteAuthLoginCommandStoresOnePasswordConfig(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
 

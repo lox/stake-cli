@@ -108,16 +108,30 @@ func Load(path string) (*File, error) {
 }
 
 func legacyResolvePath() (string, error) {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		return "", nil
 	}
 
-	homeDir, err := os.UserHomeDir()
+	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", fmt.Errorf("resolve user config dir: %w", err)
 	}
 
-	return filepath.Join(homeDir, "Library", "Application Support", "stake-cli", "accounts.json"), nil
+	return legacyResolvePathForOS(runtime.GOOS, configDir), nil
+}
+
+func legacyResolvePathForOS(goos string, configDir string) string {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		return ""
+	}
+
+	switch goos {
+	case "darwin", "windows":
+		return filepath.Join(configDir, "stake-cli", "accounts.json")
+	default:
+		return ""
+	}
 }
 
 // Save writes the session store to disk.

@@ -290,6 +290,7 @@ func (c *authLoginCmd) Run(runtime *runtime) error {
 }
 
 func (c *authLoginCmd) selection(runtime *runtime) (authLoginSelection, stakelogin.OnePasswordConfig, error) {
+	var err error
 	positionalAlias := strings.TrimSpace(c.Name)
 	flagAlias := strings.TrimSpace(c.Alias)
 	userID := strings.TrimSpace(c.UserID)
@@ -303,11 +304,6 @@ func (c *authLoginCmd) selection(runtime *runtime) (authLoginSelection, stakelog
 	alias := flagAlias
 	if alias == "" {
 		alias = positionalAlias
-	}
-
-	onePassword, err := c.onePasswordConfig(runtime, alias)
-	if err != nil {
-		return authLoginSelection{}, stakelogin.OnePasswordConfig{}, err
 	}
 
 	expectedUserID := userID
@@ -325,6 +321,15 @@ func (c *authLoginCmd) selection(runtime *runtime) (authLoginSelection, stakelog
 		} else {
 			accountName = "discovery"
 		}
+	}
+
+	onePasswordLookupName := ""
+	if alias != "" || userID != "" {
+		onePasswordLookupName = accountName
+	}
+	onePassword, err := c.onePasswordConfig(runtime, onePasswordLookupName)
+	if err != nil {
+		return authLoginSelection{}, stakelogin.OnePasswordConfig{}, err
 	}
 
 	return authLoginSelection{

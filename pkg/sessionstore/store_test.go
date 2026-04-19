@@ -132,6 +132,33 @@ func TestLoadFallsBackToLegacyMacOSPath(t *testing.T) {
 	}
 }
 
+func TestLegacyResolvePathForOS(t *testing.T) {
+	t.Run("supports macOS legacy config dir", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "Library", "Application Support")
+		got := legacyResolvePathForOS("darwin", configDir)
+		want := filepath.Join(configDir, "stake-cli", "accounts.json")
+		if got != want {
+			t.Fatalf("expected macOS legacy path %q, got %q", want, got)
+		}
+	})
+
+	t.Run("supports windows legacy config dir", func(t *testing.T) {
+		configDir := filepath.Join("C:/Users/alice/AppData/Roaming")
+		got := legacyResolvePathForOS("windows", configDir)
+		want := filepath.Join(configDir, "stake-cli", "accounts.json")
+		if got != want {
+			t.Fatalf("expected Windows legacy path %q, got %q", want, got)
+		}
+	})
+
+	t.Run("ignores unsupported operating systems", func(t *testing.T) {
+		got := legacyResolvePathForOS("linux", filepath.Join(t.TempDir(), ".config"))
+		if got != "" {
+			t.Fatalf("expected no legacy path for linux, got %q", got)
+		}
+	})
+}
+
 func TestUpdateReplacesExistingAccount(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
 
