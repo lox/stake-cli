@@ -1163,6 +1163,146 @@ func TestExecuteAuthLoginCommandSyncsGeneratedAliases(t *testing.T) {
 	}
 }
 
+func TestExecuteAuthLoginCommandUsesValidatedUserWhenProductConfigActiveUserIsStale(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "personal", SessionToken: "stale-token", UserID: "user-trust"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user/product/config" {
+				t.Fatalf("expected GET /api/user/product/config, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token header, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.UserList{
+				ActiveUser:   "user-personal",
+				MasterUserID: "user-personal",
+				Users: []stake.ListedUser{
+					{UserID: "user-trust", FirstName: "The Trustee for the DONALD FAMILY TRUST", AccountType: "DISCRETIONARY_TRUST"},
+					{UserID: "user-personal", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL"},
+				},
+			}); err != nil {
+				t.Fatalf("encoding product config response: %v", err)
+			}
+		case 2:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token for validated-user lookup, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-trust", Email: "trust@example.test", AccountType: "DISCRETIONARY_TRUST"}); err != nil {
+				t.Fatalf("encoding trust user: %v", err)
+			}
+		case 3:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "personal-token" {
+				t.Fatalf("expected personal token for personal validation, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-personal", Email: "personal@example.test", AccountType: "INDIVIDUAL"}); err != nil {
+				t.Fatalf("encoding personal user: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected extra request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	loginCalls := 0
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = cfg
+		_ = logger
+		loginCalls++
+		switch loginCalls {
+		case 1:
+			if cfg.ExpectedUserID != "user-trust" {
+				t.Fatalf("expected first login to target stored trust user id, got %q", cfg.ExpectedUserID)
+			}
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "captured-token"}, nil
+		case 2:
+			if cfg.AccountName != "personal" {
+				t.Fatalf("expected second login account personal, got %q", cfg.AccountName)
+			}
+			if cfg.ExpectedUserID != "user-personal" {
+				t.Fatalf("expected personal alias to target individual user id, got %q", cfg.ExpectedUserID)
+			}
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "personal-token"}, nil
+		default:
+			t.Fatalf("unexpected extra login call %d", loginCalls)
+			return nil, nil
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"--base-url", server.URL,
+		"auth", "login", "personal",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	var response authLoginResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if response.Account.Name != "family-trust" {
+		t.Fatalf("expected validated trust alias to stay active, got %q", response.Account.Name)
+	}
+
+	updatedStore, err := sessionstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	trust, err := updatedStore.Get("family-trust")
+	if err != nil {
+		t.Fatalf("Get family-trust returned error: %v", err)
+	}
+	if trust.UserID != "user-trust" {
+		t.Fatalf("expected trust alias user id to be stored, got %q", trust.UserID)
+	}
+	if trust.SessionToken != "captured-token" {
+		t.Fatalf("expected trust token to stay captured-token, got %q", trust.SessionToken)
+	}
+
+	personal, err := updatedStore.Get("personal")
+	if err != nil {
+		t.Fatalf("Get personal returned error: %v", err)
+	}
+	if personal.UserID != "user-personal" {
+		t.Fatalf("expected personal user id to be individual, got %q", personal.UserID)
+	}
+	if personal.SessionToken != "personal-token" {
+		t.Fatalf("expected personal token to be refreshed, got %q", personal.SessionToken)
+	}
+	if requestCount != 3 {
+		t.Fatalf("expected 3 API requests, got %d", requestCount)
+	}
+	if loginCalls != 2 {
+		t.Fatalf("expected 2 login calls, got %d", loginCalls)
+	}
+}
+
 func TestExecuteAuthLoginCommandRefreshesExplicitAliasAlongsideGeneratedAlias(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
 	store := &sessionstore.File{}
@@ -1279,8 +1419,8 @@ func TestExecuteAuthLoginCommandRefreshesExplicitAliasAlongsideGeneratedAlias(t 
 	if personal.SessionToken != "rotated-login-token" {
 		t.Fatalf("expected generated personal alias to be refreshed, got %q", personal.SessionToken)
 	}
-	if requestCount != 3 {
-		t.Fatalf("expected 3 API requests, got %d", requestCount)
+	if requestCount != 2 {
+		t.Fatalf("expected 2 API requests, got %d", requestCount)
 	}
 }
 
@@ -1390,8 +1530,8 @@ func TestExecuteAuthLoginCommandPreservesExplicitAliasWithoutStoredUserID(t *tes
 	if personal.SessionToken != "rotated-login-token" {
 		t.Fatalf("expected generated personal alias token to be refreshed, got %q", personal.SessionToken)
 	}
-	if requestCount != 3 {
-		t.Fatalf("expected 3 API requests, got %d", requestCount)
+	if requestCount != 2 {
+		t.Fatalf("expected 2 API requests, got %d", requestCount)
 	}
 }
 

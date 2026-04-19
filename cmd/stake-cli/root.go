@@ -500,17 +500,28 @@ func (c *authLoginCmd) syncLoginAccounts(runtime *runtime, selection authLoginSe
 	})
 
 	currentUserID := strings.TrimSpace(userList.ActiveUser)
+	validatedUser, err := client.ValidateSession(runtime.ctx)
+	if err != nil {
+		return nil, sessionstore.View{}, err
+	}
+	if validatedUserID := strings.TrimSpace(validatedUser.UserID); validatedUserID != "" {
+		if currentUserID != "" && currentUserID != validatedUserID {
+			runtime.logger.Warn("Stake product config reported a different active user than /api/user", "reported_user_id", currentUserID, "validated_user_id", validatedUserID)
+		}
+		currentUserID = validatedUserID
+	}
+
 	viewsByUserID := make(map[string]sessionstore.View, len(users))
 	if currentUserID != "" {
 		if activeAlias, ok := aliases[currentUserID]; ok {
-			view, err := runtime.validateAndStoreExpectedAccount(activeAlias, currentUserID, client.SessionToken(), &onePassword)
+			view, err := runtime.storeValidatedAccount(activeAlias, client.SessionToken(), validatedUser, &onePassword)
 			if err != nil {
 				return nil, sessionstore.View{}, err
 			}
 			viewsByUserID[currentUserID] = view
 
 			if explicitAliasName := selection.explicitAccountName(aliases, activeAlias, currentUserID); explicitAliasName != "" {
-				if _, err := runtime.validateAndStoreExpectedAccount(explicitAliasName, currentUserID, client.SessionToken(), &onePassword); err != nil {
+				if _, err := runtime.storeValidatedAccount(explicitAliasName, client.SessionToken(), validatedUser, &onePassword); err != nil {
 					return nil, sessionstore.View{}, err
 				}
 			}
