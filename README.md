@@ -23,15 +23,29 @@ import "github.com/lox/stake-cli/pkg/sessionstore"
 Preferred browser-first login:
 
 ```bash
+./dist/stake-cli auth login
 ./dist/stake-cli auth login personal
 ./dist/stake-cli auth login family-trust
 ```
 
 That flow opens a visible browser at Stake's login page and lets you complete login and MFA.
 
+Without `--alias`, `--user-id`, or a positional alias, `auth login` starts in discovery mode. It captures the first available session, infers the active alias, then writes all linked aliases it can discover.
+
 If the alias is new, the CLI waits for you to press Enter in the terminal before capturing `localStorage.sessionKey`.
 
-If the alias already exists in the auth store and has a known `user_id`, `auth login` watches for `sessionKey` automatically, validates the browser session, and switches it to that stored account before saving the token. That makes it safer to refresh non-default accounts such as trusts without manually switching in the UI first.
+If the alias already exists in the auth store and has a known `user_id`, `auth login` watches for `sessionKey` automatically and aligns the captured browser session to that stored account before saving the token.
+
+To target the initial login explicitly, use either `--alias` or `--user-id`:
+
+```bash
+./dist/stake-cli auth login --alias personal
+./dist/stake-cli auth login --user-id 303b50f6-d7bf-4856-b2ef-2e11a958795f
+```
+
+After the first successful capture, `auth login` discovers the linked Stake users, generates deterministic aliases such as `personal`, `family-trust`, and `smsf`, then runs additional isolated browser logins for the remaining aliases so each saved account gets its own fresh token. This avoids `/api/user/switch` invalidating tokens that were already written earlier in the sync.
+
+When 1Password automation is configured, those follow-up alias captures reuse the same stored credentials automatically. Without 1Password automation, each additional alias capture still runs in its own browser session and may require you to complete the login flow again.
 
 You can also have `auth login` load credentials from 1Password and submit the Stake login form for you.
 
@@ -110,12 +124,13 @@ Useful auth commands:
 Once auth is stored locally, `stake-cli` talks directly to Stake:
 
 ```bash
-./dist/stake-cli user primary
+./dist/stake-cli status
+./dist/stake-cli users primary
 ./dist/stake-cli trades primary
 ```
 
 For testing, you can point the CLI at a different API base URL:
 
 ```bash
-./dist/stake-cli --base-url http://127.0.0.1:18081 user primary
+./dist/stake-cli --base-url http://127.0.0.1:18081 status
 ```

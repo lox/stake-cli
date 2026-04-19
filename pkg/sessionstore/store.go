@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -59,9 +60,13 @@ func ResolvePath(path string) (string, error) {
 		return trimmed, nil
 	}
 
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user config dir: %w", err)
+	configDir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if configDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home dir: %w", err)
+		}
+		configDir = filepath.Join(homeDir, ".config")
 	}
 
 	return filepath.Join(configDir, "stake-cli", "accounts.json"), nil
@@ -76,10 +81,21 @@ func Load(path string) (*File, error) {
 
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &File{}, nil
+		if errors.Is(err, os.ErrNotExist) && strings.TrimSpace(path) == "" {
+			legacyPath, legacyErr := legacyResolvePath()
+			if legacyErr != nil {
+				return nil, legacyErr
+			}
+			if legacyPath != "" {
+				data, err = os.ReadFile(legacyPath)
+			}
 		}
-		return nil, fmt.Errorf("read session store: %w", err)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return &File{}, nil
+			}
+			return nil, fmt.Errorf("read session store: %w", err)
+		}
 	}
 
 	var store File
@@ -89,6 +105,33 @@ func Load(path string) (*File, error) {
 	store.sortAccounts()
 
 	return &store, nil
+}
+
+func legacyResolvePath() (string, error) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		return "", nil
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
+	}
+
+	return legacyResolvePathForOS(runtime.GOOS, configDir), nil
+}
+
+func legacyResolvePathForOS(goos string, configDir string) string {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		return ""
+	}
+
+	switch goos {
+	case "darwin", "windows":
+		return filepath.Join(configDir, "stake-cli", "accounts.json")
+	default:
+		return ""
+	}
 }
 
 // Save writes the session store to disk.

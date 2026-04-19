@@ -1,10 +1,58 @@
 package sessionstore
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
+func TestResolvePath(t *testing.T) {
+	t.Run("uses explicit path", func(t *testing.T) {
+		explicit := filepath.Join(t.TempDir(), "custom-accounts.json")
+
+		resolved, err := ResolvePath(explicit)
+		if err != nil {
+			t.Fatalf("ResolvePath returned error: %v", err)
+		}
+		if resolved != explicit {
+			t.Fatalf("expected explicit path %q, got %q", explicit, resolved)
+		}
+	})
+
+	t.Run("uses XDG_CONFIG_HOME when set", func(t *testing.T) {
+		xdgConfigHome := filepath.Join(t.TempDir(), "xdg-config")
+		t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+		resolved, err := ResolvePath("")
+		if err != nil {
+			t.Fatalf("ResolvePath returned error: %v", err)
+		}
+
+		want := filepath.Join(xdgConfigHome, "stake-cli", "accounts.json")
+		if resolved != want {
+			t.Fatalf("expected XDG path %q, got %q", want, resolved)
+		}
+	})
+
+	t.Run("falls back to ~/.config when XDG_CONFIG_HOME is unset", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		t.Setenv("XDG_CONFIG_HOME", "")
+		_ = os.Unsetenv("XDG_CONFIG_HOME")
+
+		resolved, err := ResolvePath("")
+		if err != nil {
+			t.Fatalf("ResolvePath returned error: %v", err)
+		}
+
+		want := filepath.Join(homeDir, ".config", "stake-cli", "accounts.json")
+		if resolved != want {
+			t.Fatalf("expected default XDG path %q, got %q", want, resolved)
+		}
+	})
+}
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
@@ -51,6 +99,64 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	if !entry.UpdatedAt.Equal(updatedAt) {
 		t.Fatalf("expected updated_at %s, got %s", updatedAt, entry.UpdatedAt)
 	}
+}
+
+func TestLoadFallsBackToLegacyMacOSPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("legacy macOS path only applies on darwin")
+	}
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	_ = os.Unsetenv("XDG_CONFIG_HOME")
+
+	legacyPath := filepath.Join(homeDir, "Library", "Application Support", "stake-cli", "accounts.json")
+	legacyStore := &File{}
+	legacyStore.Upsert(Entry{Name: "legacy", SessionToken: "legacy-token"})
+	if err := Save(legacyPath, legacyStore); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	loaded, err := Load("")
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	entry, err := loaded.Get("legacy")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if entry.SessionToken != "legacy-token" {
+		t.Fatalf("expected legacy-token, got %q", entry.SessionToken)
+	}
+}
+
+func TestLegacyResolvePathForOS(t *testing.T) {
+	t.Run("supports macOS legacy config dir", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "Library", "Application Support")
+		got := legacyResolvePathForOS("darwin", configDir)
+		want := filepath.Join(configDir, "stake-cli", "accounts.json")
+		if got != want {
+			t.Fatalf("expected macOS legacy path %q, got %q", want, got)
+		}
+	})
+
+	t.Run("supports windows legacy config dir", func(t *testing.T) {
+		configDir := filepath.Join("C:/Users/alice/AppData/Roaming")
+		got := legacyResolvePathForOS("windows", configDir)
+		want := filepath.Join(configDir, "stake-cli", "accounts.json")
+		if got != want {
+			t.Fatalf("expected Windows legacy path %q, got %q", want, got)
+		}
+	})
+
+	t.Run("ignores unsupported operating systems", func(t *testing.T) {
+		got := legacyResolvePathForOS("linux", filepath.Join(t.TempDir(), ".config"))
+		if got != "" {
+			t.Fatalf("expected no legacy path for linux, got %q", got)
+		}
+	})
 }
 
 func TestUpdateReplacesExistingAccount(t *testing.T) {
