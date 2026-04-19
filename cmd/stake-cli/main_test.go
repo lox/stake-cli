@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +70,78 @@ func TestExecuteAuthAddCommand(t *testing.T) {
 	}
 }
 
-func TestExecuteUserCommandUsesStoredAuth(t *testing.T) {
+func TestExecuteStatusCommandUsesStoredAuthForAllAccounts(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "primary", SessionToken: "stored-token"})
+	store.Upsert(sessionstore.Entry{Name: "secondary", SessionToken: "broken-token"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/user" {
+			t.Fatalf("expected /api/user path, got %s", r.URL.Path)
+		}
+
+		switch got := r.Header.Get("Stake-Session-Token"); got {
+		case "stored-token":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-123", Email: "account@example.test", Username: "sample-user", AccountType: "individual"}); err != nil {
+				t.Fatalf("encoding response: %v", err)
+			}
+		case "broken-token":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("expired"))
+		default:
+			t.Fatalf("unexpected token header %q", got)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "status"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	var response statusResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if len(response.Accounts) != 2 {
+		t.Fatalf("expected 2 account statuses, got %d", len(response.Accounts))
+	}
+	if response.Accounts[0].Account != "primary" || !response.Accounts[0].OK {
+		t.Fatalf("expected primary to be ok, got %+v", response.Accounts[0])
+	}
+	if response.Accounts[0].User == nil || response.Accounts[0].User.Email != "account@example.test" {
+		t.Fatalf("expected primary live user payload, got %+v", response.Accounts[0].User)
+	}
+	if response.Accounts[1].Account != "secondary" || response.Accounts[1].OK {
+		t.Fatalf("expected secondary to fail, got %+v", response.Accounts[1])
+	}
+	if !strings.Contains(response.Accounts[1].Error, "API error 401") {
+		t.Fatalf("expected secondary error to mention 401, got %q", response.Accounts[1].Error)
+	}
+	if requestCount != 2 {
+		t.Fatalf("expected 2 validation requests, got %d", requestCount)
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if !bytes.Contains(data, []byte("account@example.test")) {
+		t.Fatalf("expected updated store metadata in %s", string(data))
+	}
+}
+
+func TestExecuteAuthStatusCompatibilityCommandUsesStoredAuthForAllAccounts(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
 	store := &sessionstore.File{}
 	store.Upsert(sessionstore.Entry{Name: "primary", SessionToken: "stored-token"})
@@ -96,31 +168,185 @@ func TestExecuteUserCommandUsesStoredAuth(t *testing.T) {
 	defer server.Close()
 
 	var stdout bytes.Buffer
-	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "user", "primary"}, &stdout, &bytes.Buffer{}); err != nil {
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "auth", "status"}, &stdout, io.Discard); err != nil {
 		t.Fatalf("execute returned error: %v", err)
 	}
 
-	var response userResponse
+	var response statusResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if len(response.Accounts) != 1 {
+		t.Fatalf("expected 1 account status, got %d", len(response.Accounts))
+	}
+	if response.Accounts[0].Account != "primary" || !response.Accounts[0].OK {
+		t.Fatalf("expected primary to be ok, got %+v", response.Accounts[0])
+	}
+}
+
+func TestExecuteUsersCommandUsesStoredAuth(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "primary", SessionToken: "stored-token"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/user/product/config" {
+			t.Fatalf("expected /api/user/product/config path, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Stake-Session-Token"); got != "stored-token" {
+			t.Fatalf("expected stored token header, got %q", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stake.UserList{
+			ActiveUser:    "user-2",
+			ActiveProduct: "AU_TRADING",
+			MasterUserID:  "user-1",
+			Users: []stake.ListedUser{
+				{UserID: "user-1", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL", Products: []stake.ListedUserProduct{{Type: "AU_TRADING", Status: "OPEN"}}},
+				{UserID: "user-2", FirstName: "Donald Family Trust", AccountType: "DISCRETIONARY_TRUST", Products: []stake.ListedUserProduct{{Type: "US_TRADING", Status: "OPEN"}}},
+			},
+		}); err != nil {
+			t.Fatalf("encoding response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "users", "primary"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	var response usersResponse
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		t.Fatalf("decoding stdout: %v", err)
 	}
 	if response.Account != "primary" {
 		t.Fatalf("expected primary account, got %q", response.Account)
 	}
-	if response.User == nil || response.User.Email != "account@example.test" {
-		t.Fatalf("expected live user payload, got %+v", response.User)
+	if response.ActiveUser != "user-2" {
+		t.Fatalf("expected active user user-2, got %q", response.ActiveUser)
 	}
-
-	data, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatalf("ReadFile returned error: %v", err)
+	if response.MasterUserID != "user-1" {
+		t.Fatalf("expected master user user-1, got %q", response.MasterUserID)
 	}
-	if !bytes.Contains(data, []byte("account@example.test")) {
-		t.Fatalf("expected updated store metadata in %s", string(data))
+	if len(response.Users) != 2 {
+		t.Fatalf("expected 2 users, got %d", len(response.Users))
+	}
+	if !response.Users[0].Master {
+		t.Fatal("expected first user to be marked as master")
+	}
+	if response.Users[0].Alias != "personal" {
+		t.Fatalf("expected first user alias personal, got %q", response.Users[0].Alias)
+	}
+	if !response.Users[1].Active {
+		t.Fatal("expected second user to be marked as active")
+	}
+	if response.Users[1].Alias != "family-trust" {
+		t.Fatalf("expected second user alias family-trust, got %q", response.Users[1].Alias)
+	}
+	if len(response.Users[1].Products) != 1 || response.Users[1].Products[0].Type != "US_TRADING" {
+		t.Fatalf("expected second user US trading product, got %+v", response.Users[1].Products)
 	}
 }
 
-func TestExecuteUserCommandPreservesConcurrentStoreUpdates(t *testing.T) {
+func TestGeneratedAliasesUsesShortStableNames(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	runtime := &runtime{authStorePath: storePath}
+
+	aliases, err := runtime.generatedAliases(&stake.UserList{
+		MasterUserID: "user-personal",
+		Users: []stake.ListedUser{
+			{UserID: "user-smsf", FirstName: "Donald SMSF", AccountType: "SMSF_TRUST", StakeSMSFCustomer: true},
+			{UserID: "user-trust", FirstName: "The Trustee for the DONALD FAMILY TRUST", AccountType: "DISCRETIONARY_TRUST"},
+			{UserID: "user-personal", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("generatedAliases returned error: %v", err)
+	}
+	if aliases["user-personal"] != "personal" {
+		t.Fatalf("expected personal alias, got %q", aliases["user-personal"])
+	}
+	if aliases["user-smsf"] != "smsf" {
+		t.Fatalf("expected smsf alias, got %q", aliases["user-smsf"])
+	}
+	if aliases["user-trust"] != "family-trust" {
+		t.Fatalf("expected family-trust alias, got %q", aliases["user-trust"])
+	}
+}
+
+func TestGeneratedAliasesPreservesExistingAliasOwnershipDuringCollision(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "family-trust", UserID: "user-existing", SessionToken: "stored-token"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	runtime := &runtime{authStorePath: storePath}
+	aliases, err := runtime.generatedAliases(&stake.UserList{
+		Users: []stake.ListedUser{
+			{UserID: "user-collision", FirstName: "Donald Family Trust", AccountType: "DISCRETIONARY_TRUST"},
+			{UserID: "user-existing", FirstName: "The Trustee for the DONALD FAMILY TRUST", AccountType: "DISCRETIONARY_TRUST"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("generatedAliases returned error: %v", err)
+	}
+
+	if aliases["user-existing"] != "family-trust" {
+		t.Fatalf("expected existing user to keep family-trust, got %q", aliases["user-existing"])
+	}
+	if aliases["user-collision"] == "family-trust" {
+		t.Fatalf("expected colliding user to get a different alias, got %q", aliases["user-collision"])
+	}
+	if aliases["user-collision"] != "donald-family-trust" {
+		t.Fatalf("expected colliding user alias donald-family-trust, got %q", aliases["user-collision"])
+	}
+}
+
+func TestExecuteAuthListCommandUsesLegacyMacOSStoreByDefault(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("legacy macOS path only applies on darwin")
+	}
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	_ = os.Unsetenv("XDG_CONFIG_HOME")
+
+	legacyPath := filepath.Join(homeDir, "Library", "Application Support", "stake-cli", "accounts.json")
+	legacyStore := &sessionstore.File{}
+	legacyStore.Upsert(sessionstore.Entry{Name: "legacy", SessionToken: "legacy-token"})
+	if err := sessionstore.Save(legacyPath, legacyStore); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"auth", "list"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	var response authAccountsResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if len(response.Accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(response.Accounts))
+	}
+	if response.Accounts[0].Name != "legacy" {
+		t.Fatalf("expected legacy account, got %q", response.Accounts[0].Name)
+	}
+}
+
+func TestExecuteStatusCommandPreservesConcurrentStoreUpdates(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
 	store := &sessionstore.File{}
 	store.Upsert(sessionstore.Entry{
@@ -154,7 +380,7 @@ func TestExecuteUserCommandPreservesConcurrentStoreUpdates(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "user", "primary"}, io.Discard, &bytes.Buffer{}); err != nil {
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "--base-url", server.URL, "status"}, io.Discard, &bytes.Buffer{}); err != nil {
 		t.Fatalf("execute returned error: %v", err)
 	}
 
@@ -277,6 +503,11 @@ func TestExecuteAuthLoginCommandDelegatesToScaffold(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("expected GET request, got %s", r.Method)
 		}
+		if r.URL.Path == "/api/user/product/config" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
 		if r.URL.Path != "/api/user" {
 			t.Fatalf("expected /api/user path, got %s", r.URL.Path)
 		}
@@ -286,7 +517,7 @@ func TestExecuteAuthLoginCommandDelegatesToScaffold(t *testing.T) {
 
 		w.Header().Set("Stake-Session-Token", "rotated-login-token")
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-123", Email: "account@example.test", Username: "sample-user", AccountType: "individual"}); err != nil {
+		if err := json.NewEncoder(w).Encode(stake.User{UserID: "stored-user-id", Email: "account@example.test", Username: "sample-user", AccountType: "individual"}); err != nil {
 			t.Fatalf("encoding response: %v", err)
 		}
 	}))
@@ -375,6 +606,422 @@ func TestExecuteAuthLoginCommandDelegatesToScaffold(t *testing.T) {
 	}
 	if entry.Email != "account@example.test" {
 		t.Fatalf("expected stored email account@example.test, got %q", entry.Email)
+	}
+}
+
+func TestExecuteAuthLoginCommandSupportsDiscoveryWithoutSeedAlias(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path == "/api/user/product/config" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		if r.URL.Path != "/api/user" {
+			t.Fatalf("expected /api/user path, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+			t.Fatalf("expected captured token header, got %q", got)
+		}
+
+		w.Header().Set("Stake-Session-Token", "rotated-login-token")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-123", FirstName: "Lachlan", LastName: "Donald", Email: "account@example.test", Username: "sample-user", AccountType: "INDIVIDUAL"}); err != nil {
+			t.Fatalf("encoding response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{
+			Account:        cfg.AccountName,
+			LoginURL:       cfg.LoginURL,
+			CurrentURL:     "https://trading.hellostake.com/platform/dashboard",
+			BrowserVisible: cfg.ShowBrowser,
+			KeepBrowser:    cfg.KeepBrowser,
+			Status:         "session_token_detected",
+			SessionToken:   "captured-token",
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"--base-url", server.URL,
+		"auth", "login",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.AccountName != "discovery" {
+		t.Fatalf("expected discovery account name, got %q", capturedConfig.AccountName)
+	}
+	if capturedConfig.ExpectedUserID != "" {
+		t.Fatalf("expected empty expected user id, got %q", capturedConfig.ExpectedUserID)
+	}
+
+	var response authLoginResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if response.Account.Name != "personal" {
+		t.Fatalf("expected inferred personal account, got %q", response.Account.Name)
+	}
+}
+
+func TestExecuteAuthLoginCommandSupportsAliasFlag(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "personal", UserID: "stored-user-id", OPItem: "op://Private/stake.com", OPAccount: "my.1password.com"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{Account: cfg.AccountName, Status: "manual_login_pending"}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"--auth-store", storePath, "auth", "login", "--alias", "personal"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.AccountName != "personal" {
+		t.Fatalf("expected alias account name personal, got %q", capturedConfig.AccountName)
+	}
+	if capturedConfig.ExpectedUserID != "stored-user-id" {
+		t.Fatalf("expected stored user id to be forwarded, got %q", capturedConfig.ExpectedUserID)
+	}
+	if capturedConfig.OnePassword.ItemReference != "op://Private/stake.com" {
+		t.Fatalf("expected stored 1Password item, got %q", capturedConfig.OnePassword.ItemReference)
+	}
+	if capturedConfig.OnePassword.DesktopAccount != "my.1password.com" {
+		t.Fatalf("expected stored 1Password desktop account, got %q", capturedConfig.OnePassword.DesktopAccount)
+	}
+}
+
+func TestExecuteAuthLoginCommandSupportsUserIDFlag(t *testing.T) {
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	var capturedConfig stakelogin.Config
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = logger
+		capturedConfig = cfg
+		return &stakelogin.Result{Account: cfg.AccountName, Status: "manual_login_pending"}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{"auth", "login", "--user-id", "12345678-1234-1234-1234-123456789abc"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	if capturedConfig.AccountName != "user-12345678" {
+		t.Fatalf("expected synthesized user account name, got %q", capturedConfig.AccountName)
+	}
+	if capturedConfig.ExpectedUserID != "12345678-1234-1234-1234-123456789abc" {
+		t.Fatalf("expected explicit user id to be forwarded, got %q", capturedConfig.ExpectedUserID)
+	}
+}
+
+func TestExecuteAuthLoginCommandRejectsAliasAndUserIDTogether(t *testing.T) {
+	err := execute(context.Background(), []string{"auth", "login", "--alias", "personal", "--user-id", "123"}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected execute to fail when both --alias and --user-id are provided")
+	}
+	if !strings.Contains(err.Error(), "--alias") || !strings.Contains(err.Error(), "--user-id") {
+		t.Fatalf("expected mutual exclusion error mentioning both flags, got %v", err)
+	}
+}
+
+func TestExecuteAuthLoginCommandSyncsGeneratedAliases(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store := &sessionstore.File{}
+	store.Upsert(sessionstore.Entry{Name: "family-trust", SessionToken: "stale-token"})
+	store.Upsert(sessionstore.Entry{Name: "personal", SessionToken: "stale-token", UserID: "303b50f6-d7bf-4856-b2ef-2e11a958795f"})
+	store.Upsert(sessionstore.Entry{Name: "smsf", SessionToken: "stale-token", UserID: "303b50f6-d7bf-4856-b2ef-2e11a958795f"})
+	if err := sessionstore.Save(storePath, store); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user/product/config" {
+				t.Fatalf("expected GET /api/user/product/config, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token header, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.UserList{
+				ActiveUser:   "303b50f6-d7bf-4856-b2ef-2e11a958795f",
+				MasterUserID: "7b1932ce-2a8b-40f3-bc42-b88d23770622",
+				Users: []stake.ListedUser{
+					{UserID: "303b50f6-d7bf-4856-b2ef-2e11a958795f", FirstName: "The Trustee for the DONALD FAMILY TRUST", AccountType: "DISCRETIONARY_TRUST"},
+					{UserID: "7b1932ce-2a8b-40f3-bc42-b88d23770622", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL"},
+					{UserID: "945365ff-556c-4730-baef-9aad2161b647", FirstName: "Donald SMSF", AccountType: "SMSF_TRUST", StakeSMSFCustomer: true},
+				},
+			}); err != nil {
+				t.Fatalf("encoding product config response: %v", err)
+			}
+		case 2:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token for active trust validation, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "303b50f6-d7bf-4856-b2ef-2e11a958795f", Email: "lachlan@ljd.cc", AccountType: "DISCRETIONARY_TRUST"}); err != nil {
+				t.Fatalf("encoding trust user: %v", err)
+			}
+		case 3:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "personal-token" {
+				t.Fatalf("expected personal token for personal validation, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "7b1932ce-2a8b-40f3-bc42-b88d23770622", Email: "lachlan@ljd.cc", AccountType: "INDIVIDUAL"}); err != nil {
+				t.Fatalf("encoding personal user: %v", err)
+			}
+		case 4:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "smsf-token" {
+				t.Fatalf("expected smsf token for smsf validation, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "945365ff-556c-4730-baef-9aad2161b647", Email: "lachlan@ljd.cc", AccountType: "SMSF_TRUST"}); err != nil {
+				t.Fatalf("encoding smsf user: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected extra request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	loginCalls := 0
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = cfg
+		_ = logger
+		loginCalls++
+		switch loginCalls {
+		case 1:
+			if cfg.AccountName != "personal" {
+				t.Fatalf("expected first login account personal, got %q", cfg.AccountName)
+			}
+			if cfg.ExpectedUserID != "303b50f6-d7bf-4856-b2ef-2e11a958795f" {
+				t.Fatalf("expected first login expected user id to come from stored personal alias, got %q", cfg.ExpectedUserID)
+			}
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "captured-token"}, nil
+		case 2:
+			if cfg.AccountName != "personal" {
+				t.Fatalf("expected second login account personal, got %q", cfg.AccountName)
+			}
+			if cfg.ExpectedUserID != "7b1932ce-2a8b-40f3-bc42-b88d23770622" {
+				t.Fatalf("expected personal alias to target individual user id, got %q", cfg.ExpectedUserID)
+			}
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "personal-token"}, nil
+		case 3:
+			if cfg.AccountName != "smsf" {
+				t.Fatalf("expected third login account smsf, got %q", cfg.AccountName)
+			}
+			if cfg.ExpectedUserID != "945365ff-556c-4730-baef-9aad2161b647" {
+				t.Fatalf("expected smsf alias to target smsf user id, got %q", cfg.ExpectedUserID)
+			}
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "smsf-token"}, nil
+		default:
+			t.Fatalf("unexpected extra login call %d", loginCalls)
+			return nil, nil
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"--base-url", server.URL,
+		"auth", "login", "personal",
+		"--op-item", "op://Private/stake.com",
+		"--op-account", "donald-family.1password.com",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	var response authLoginResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decoding stdout: %v", err)
+	}
+	if response.Account.Name != "family-trust" {
+		t.Fatalf("expected active account family-trust, got %q", response.Account.Name)
+	}
+	if len(response.Accounts) != 3 {
+		t.Fatalf("expected 3 synced accounts, got %d", len(response.Accounts))
+	}
+	if loginCalls != 3 {
+		t.Fatalf("expected 3 login calls, got %d", loginCalls)
+	}
+
+	updatedStore, err := sessionstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	familyTrust, err := updatedStore.Get("family-trust")
+	if err != nil {
+		t.Fatalf("Get family-trust returned error: %v", err)
+	}
+	if familyTrust.UserID != "303b50f6-d7bf-4856-b2ef-2e11a958795f" {
+		t.Fatalf("expected family-trust user id to be trust, got %q", familyTrust.UserID)
+	}
+	if familyTrust.SessionToken != "captured-token" {
+		t.Fatalf("expected family-trust token to stay captured-token, got %q", familyTrust.SessionToken)
+	}
+	if familyTrust.OPAccount != "donald-family.1password.com" {
+		t.Fatalf("expected family-trust op account to persist, got %q", familyTrust.OPAccount)
+	}
+
+	personal, err := updatedStore.Get("personal")
+	if err != nil {
+		t.Fatalf("Get personal returned error: %v", err)
+	}
+	if personal.UserID != "7b1932ce-2a8b-40f3-bc42-b88d23770622" {
+		t.Fatalf("expected personal user id to be individual, got %q", personal.UserID)
+	}
+	if personal.SessionToken != "personal-token" {
+		t.Fatalf("expected personal token to be refreshed, got %q", personal.SessionToken)
+	}
+
+	smsf, err := updatedStore.Get("smsf")
+	if err != nil {
+		t.Fatalf("Get smsf returned error: %v", err)
+	}
+	if smsf.UserID != "945365ff-556c-4730-baef-9aad2161b647" {
+		t.Fatalf("expected smsf user id to be smsf, got %q", smsf.UserID)
+	}
+	if smsf.SessionToken != "smsf-token" {
+		t.Fatalf("expected smsf token to be refreshed, got %q", smsf.SessionToken)
+	}
+}
+
+func TestExecuteAuthLoginCommandFailsWhenSwitchedUserValidatesAsDifferentAccount(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user/product/config" {
+				t.Fatalf("expected GET /api/user/product/config, got %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.UserList{
+				ActiveUser:   "user-trust",
+				MasterUserID: "user-personal",
+				Users: []stake.ListedUser{
+					{UserID: "user-trust", FirstName: "The Trustee for the DONALD FAMILY TRUST", AccountType: "DISCRETIONARY_TRUST"},
+					{UserID: "user-personal", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL"},
+				},
+			}); err != nil {
+				t.Fatalf("encoding product config response: %v", err)
+			}
+		case 2:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token for trust validation, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-trust", Email: "lachlan@ljd.cc", AccountType: "DISCRETIONARY_TRUST"}); err != nil {
+				t.Fatalf("encoding trust user: %v", err)
+			}
+		case 3:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "personal-token" {
+				t.Fatalf("expected personal token for personal validation, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-trust", Email: "lachlan@ljd.cc", AccountType: "DISCRETIONARY_TRUST"}); err != nil {
+				t.Fatalf("encoding mismatched user: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected extra request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	loginCalls := 0
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = cfg
+		_ = logger
+		loginCalls++
+		switch loginCalls {
+		case 1:
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "captured-token"}, nil
+		case 2:
+			if cfg.ExpectedUserID != "user-personal" {
+				t.Fatalf("expected second login to target user-personal, got %q", cfg.ExpectedUserID)
+			}
+			return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "personal-token"}, nil
+		default:
+			t.Fatalf("unexpected extra login call %d", loginCalls)
+			return nil, nil
+		}
+	}
+
+	err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"--base-url", server.URL,
+		"auth", "login", "personal",
+	}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected execute to fail when an alias token validates as the wrong user")
+	}
+	if !strings.Contains(err.Error(), "expected user") {
+		t.Fatalf("expected expected-user mismatch error, got %v", err)
 	}
 }
 
@@ -508,6 +1155,11 @@ func TestExecuteAuthLoginCommandStoresOnePasswordConfig(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path == "/api/user/product/config" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
 		}
 		if r.URL.Path != "/api/user" {
 			t.Fatalf("expected /api/user path, got %s", r.URL.Path)

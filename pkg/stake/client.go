@@ -73,6 +73,43 @@ type User struct {
 	AccountType string `json:"accountType"`
 }
 
+// UserList describes the switchable Stake users and active selection for one session.
+type UserList struct {
+	Users         []ListedUser `json:"users"`
+	ActiveUser    string       `json:"activeUser"`
+	ActiveProduct string       `json:"activeProduct"`
+	MasterUserID  string       `json:"masterUserId"`
+}
+
+// ListedUser is one Stake user entry returned by the product config endpoint.
+type ListedUser struct {
+	UserID            string              `json:"userId"`
+	FirstName         string              `json:"firstName"`
+	MiddleName        string              `json:"middleName"`
+	LastName          string              `json:"lastName"`
+	AccountType       string              `json:"accountType"`
+	AccountStatus     string              `json:"accountStatus"`
+	StakeKycStatus    string              `json:"stakeKycStatus"`
+	StakeSMSFCustomer bool                `json:"stakeSmsfCustomer"`
+	RegionIdentifier  string              `json:"regionIdentifier"`
+	EmailVerified     bool                `json:"emailVerified"`
+	CreatedDate       int64               `json:"createdDate"`
+	Products          []ListedUserProduct `json:"products"`
+	WithdrawalAccess  bool                `json:"withdrawalAccess"`
+	Staff             bool                `json:"staff"`
+}
+
+// ListedUserProduct is one product available to a Stake user.
+type ListedUserProduct struct {
+	Type                        string `json:"type"`
+	Status                      string `json:"status"`
+	ProductPartnerAccountNumber string `json:"productPartnerAccountNumber"`
+	HINNumber                   string `json:"hinNumber"`
+	OpenedDate                  int64  `json:"openedDate"`
+	LendingEnabled              bool   `json:"lendingEnabled"`
+	ExtendedHoursEnabled        bool   `json:"extendedHoursEnabled"`
+}
+
 // ValidateSession validates the session token by calling /api/user
 func (c *Client) ValidateSession(ctx context.Context) (*User, error) {
 	var user User
@@ -80,6 +117,15 @@ func (c *Client) ValidateSession(ctx context.Context) (*User, error) {
 		return nil, fmt.Errorf("validating session: %w", err)
 	}
 	return &user, nil
+}
+
+// ListUsers returns the Stake users available to the current session.
+func (c *Client) ListUsers(ctx context.Context) (*UserList, error) {
+	var users UserList
+	if err := c.doGet(ctx, "/api/user/product/config", &users); err != nil {
+		return nil, fmt.Errorf("listing users: %w", err)
+	}
+	return &users, nil
 }
 
 // SwitchUser switches the active Stake account for the current session.

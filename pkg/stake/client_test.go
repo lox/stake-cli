@@ -138,6 +138,64 @@ func TestSwitchUserSendsExpectedHeadersAndRefreshesSessionToken(t *testing.T) {
 	}
 }
 
+func TestListUsersReturnsProductConfigAndRefreshesSessionToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/user/product/config" {
+			t.Fatalf("expected /api/user/product/config path, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Stake-Session-Token"); got != "initial-token" {
+			t.Fatalf("expected initial token header, got %q", got)
+		}
+
+		w.Header().Set("Stake-Session-Token", "rotated-token")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(UserList{
+			ActiveUser:    "user-2",
+			ActiveProduct: "AU_TRADING",
+			MasterUserID:  "user-1",
+			Users: []ListedUser{
+				{UserID: "user-1", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL", Products: []ListedUserProduct{{Type: "AU_TRADING", Status: "OPEN"}}},
+				{UserID: "user-2", FirstName: "Donald Family Trust", AccountType: "DISCRETIONARY_TRUST", Products: []ListedUserProduct{{Type: "AU_TRADING", Status: "OPEN"}}},
+			},
+		}); err != nil {
+			t.Fatalf("encoding response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	refreshedToken := ""
+	client := NewClient(Config{
+		BaseURL:      server.URL,
+		SessionToken: "initial-token",
+		OnSessionToken: func(token string) {
+			refreshedToken = token
+		},
+	}, log.New(io.Discard))
+
+	users, err := client.ListUsers(context.Background())
+	if err != nil {
+		t.Fatalf("ListUsers returned error: %v", err)
+	}
+	if users.ActiveUser != "user-2" {
+		t.Fatalf("expected active user user-2, got %q", users.ActiveUser)
+	}
+	if users.MasterUserID != "user-1" {
+		t.Fatalf("expected master user user-1, got %q", users.MasterUserID)
+	}
+	if len(users.Users) != 2 {
+		t.Fatalf("expected 2 users, got %d", len(users.Users))
+	}
+	if users.Users[1].AccountType != "DISCRETIONARY_TRUST" {
+		t.Fatalf("expected discretionary trust account, got %q", users.Users[1].AccountType)
+	}
+	if refreshedToken != "rotated-token" {
+		t.Fatalf("expected callback token rotated-token, got %q", refreshedToken)
+	}
+}
+
 func TestConvertNYSETransactionsAssignsCommissionToFinalFill(t *testing.T) {
 	client := NewClient(Config{}, log.New(io.Discard))
 

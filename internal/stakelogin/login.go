@@ -164,7 +164,7 @@ func Run(ctx context.Context, cfg Config, logger *log.Logger) (*Result, error) {
 					}
 
 					lastRetryAttempt = time.Now()
-					logger.Info("Stake returned to the login page; retrying automated sign-in", "account", cfg.AccountName, "url", currentURL)
+					logger.Debug("Stake returned to the login page; retrying automated sign-in", "account", cfg.AccountName, "url", currentURL)
 					_, err = enterLoginCredentials(ctx, session.page, credentials)
 					return err
 				}
@@ -297,7 +297,7 @@ func alignSessionTokenToExpectedUser(ctx context.Context, cfg Config, logger *lo
 	user, err := client.ValidateSession(ctx)
 	if err != nil {
 		if isStakeUnauthorized(err) {
-			logger.Info(
+			logger.Debug(
 				"Stake browser session token is present, but not ready for validation yet",
 				"account", cfg.AccountName,
 				"expected_user_id", cfg.ExpectedUserID,
@@ -324,7 +324,7 @@ func alignSessionTokenToExpectedUser(ctx context.Context, cfg Config, logger *lo
 
 	user, err = client.ValidateSession(ctx)
 	if err != nil {
-		logger.Info(
+		logger.Debug(
 			"Stake account switch completed, but the browser session token is not ready for validation yet",
 			"account", cfg.AccountName,
 			"expected_user_id", cfg.ExpectedUserID,
@@ -333,7 +333,7 @@ func alignSessionTokenToExpectedUser(ctx context.Context, cfg Config, logger *lo
 		return nil, "", fmt.Errorf("%w: validate switched session token: %v", errSessionNotReady, err)
 	}
 	if strings.TrimSpace(user.UserID) != cfg.ExpectedUserID {
-		logger.Info(
+		logger.Debug(
 			"Stake account switch completed, but the expected account is not active in browser storage yet",
 			"account", cfg.AccountName,
 			"current_user_id", strings.TrimSpace(user.UserID),
