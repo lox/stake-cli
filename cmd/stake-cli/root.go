@@ -476,7 +476,7 @@ func (c *authLoginCmd) syncLoginAccounts(runtime *runtime, selection authLoginSe
 		if err != nil {
 			runtime.logger.Warn("Discovering related Stake users failed; storing fallback account only", "account", selection.accountName, "error", err)
 		}
-		view, err := runtime.storeLoginFallbackAccount(selection.alias, selection.expectedUserID, client.SessionToken(), &onePassword)
+		view, err := runtime.storeLoginFallbackAccount(selection.fallbackAccountName(), selection.expectedUserID, client.SessionToken(), &onePassword)
 		if err != nil {
 			return nil, sessionstore.View{}, err
 		}
@@ -503,6 +503,12 @@ func (c *authLoginCmd) syncLoginAccounts(runtime *runtime, selection authLoginSe
 				return nil, sessionstore.View{}, err
 			}
 			viewsByUserID[currentUserID] = view
+
+			if explicitAliasName := selection.explicitAccountName(aliases, activeAlias, currentUserID); explicitAliasName != "" {
+				if _, err := runtime.validateAndStoreExpectedAccount(explicitAliasName, currentUserID, client.SessionToken(), &onePassword); err != nil {
+					return nil, sessionstore.View{}, err
+				}
+			}
 		}
 	}
 
@@ -540,6 +546,31 @@ func (c *authLoginCmd) syncLoginAccounts(runtime *runtime, selection authLoginSe
 	}
 
 	return views, activeView, nil
+}
+
+func (s authLoginSelection) fallbackAccountName() string {
+	if !s.explicit {
+		return ""
+	}
+	return s.accountName
+}
+
+func (s authLoginSelection) explicitAccountName(aliases map[string]string, activeAlias string, activeUserID string) string {
+	if !s.explicit {
+		return ""
+	}
+	if strings.TrimSpace(activeUserID) == "" || strings.TrimSpace(s.expectedUserID) != strings.TrimSpace(activeUserID) {
+		return ""
+	}
+	if strings.TrimSpace(s.accountName) == "" || strings.TrimSpace(s.accountName) == strings.TrimSpace(activeAlias) {
+		return ""
+	}
+	for userID, alias := range aliases {
+		if strings.TrimSpace(userID) != strings.TrimSpace(activeUserID) && strings.TrimSpace(alias) == strings.TrimSpace(s.accountName) {
+			return ""
+		}
+	}
+	return s.accountName
 }
 
 func (r *runtime) generatedAliases(userList *stake.UserList) (map[string]string, error) {
@@ -723,8 +754,11 @@ func generatedAliasAvailability(alias string, userID string, store *sessionstore
 		return errors.Is(err, sessionstore.ErrAccountNotFound), false
 	}
 	existingUserID := strings.TrimSpace(entry.UserID)
-	if existingUserID == "" || existingUserID == userID {
+	if existingUserID == userID {
 		return true, false
+	}
+	if existingUserID == "" {
+		return false, false
 	}
 	if assignedAlias, ok := assignedAliases[existingUserID]; ok && assignedAlias != alias {
 		return true, false
@@ -868,12 +902,52 @@ func (r *runtime) storeLoginFallbackAccount(preferredName string, expectedUserID
 		return sessionstore.View{}, fmt.Errorf("validated user %q, expected user %q", user.UserID, expectedUserID)
 	}
 
-	name := strings.TrimSpace(preferredName)
-	if name == "" {
-		name = inferredLoginAlias(user)
+	name, err := r.loginFallbackAccountName(strings.TrimSpace(preferredName), user)
+	if err != nil {
+		return sessionstore.View{}, err
 	}
 
 	return r.storeValidatedAccount(name, client.SessionToken(), user, onePassword)
+}
+
+func (r *runtime) loginFallbackAccountName(preferredName string, user *stake.User) (string, error) {
+	if preferredName != "" {
+		return preferredName, nil
+	}
+
+	store, err := sessionstore.Load(r.authStorePath)
+	if err != nil {
+		return "", err
+	}
+
+	userID := strings.TrimSpace(user.UserID)
+	if alias := storedAliasForUserID(store, userID); alias != "" {
+		return alias, nil
+	}
+
+	candidates := []string{inferredLoginAlias(user)}
+	discoveredUserIDs := map[string]struct{}{}
+	assignedAliases := map[string]string{}
+	usedAliases := map[string]string{}
+	if alias := pickGeneratedAlias(candidates, userID, store, discoveredUserIDs, assignedAliases, usedAliases); alias != "" {
+		return alias, nil
+	}
+
+	return pickGeneratedFallbackAlias(candidates, userID, store, discoveredUserIDs, assignedAliases, usedAliases), nil
+}
+
+func storedAliasForUserID(store *sessionstore.File, userID string) string {
+	if store == nil || userID == "" {
+		return ""
+	}
+
+	for _, entry := range store.Accounts {
+		if strings.TrimSpace(entry.UserID) == userID {
+			return entry.Name
+		}
+	}
+
+	return ""
 }
 
 func (r *runtime) validateAndStoreExpectedAccount(name string, expectedUserID string, token string, onePassword *stakelogin.OnePasswordConfig) (sessionstore.View, error) {
@@ -1111,10 +1185,12 @@ func (c *statusCmd) Run(runtime *runtime) error {
 	}
 
 	response := statusResponse{Accounts: make([]accountStatusResponse, 0, len(store.Accounts))}
+	failures := 0
 	for _, stored := range store.Accounts {
 		client := runtime.stakeClient(stored.Name, stored.SessionToken)
 		user, err := client.ValidateSession(runtime.ctx)
 		if err != nil {
+			failures++
 			response.Accounts = append(response.Accounts, accountStatusResponse{
 				Account: stored.Name,
 				OK:      false,
@@ -1149,7 +1225,14 @@ func (c *statusCmd) Run(runtime *runtime) error {
 		})
 	}
 
-	return writeOutput(runtime.stdout, response)
+	if err := writeOutput(runtime.stdout, response); err != nil {
+		return err
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d account validation failure(s)", failures)
+	}
+
+	return nil
 }
 
 type authStatusCmd struct{}
