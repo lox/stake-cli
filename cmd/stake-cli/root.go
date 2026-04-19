@@ -559,7 +559,10 @@ func (s authLoginSelection) explicitAccountName(aliases map[string]string, activ
 	if !s.explicit {
 		return ""
 	}
-	if strings.TrimSpace(activeUserID) == "" || strings.TrimSpace(s.expectedUserID) != strings.TrimSpace(activeUserID) {
+	if strings.TrimSpace(activeUserID) == "" {
+		return ""
+	}
+	if expectedUserID := strings.TrimSpace(s.expectedUserID); expectedUserID != "" && expectedUserID != strings.TrimSpace(activeUserID) {
 		return ""
 	}
 	if strings.TrimSpace(s.accountName) == "" || strings.TrimSpace(s.accountName) == strings.TrimSpace(activeAlias) {

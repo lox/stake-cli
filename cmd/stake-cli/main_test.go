@@ -1284,6 +1284,117 @@ func TestExecuteAuthLoginCommandRefreshesExplicitAliasAlongsideGeneratedAlias(t 
 	}
 }
 
+func TestExecuteAuthLoginCommandPreservesExplicitAliasWithoutStoredUserID(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user/product/config" {
+				t.Fatalf("expected GET /api/user/product/config, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token header, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.UserList{
+				ActiveUser:   "user-personal",
+				MasterUserID: "user-personal",
+				Users: []stake.ListedUser{
+					{UserID: "user-personal", FirstName: "Lachlan", LastName: "Donald", AccountType: "INDIVIDUAL"},
+				},
+			}); err != nil {
+				t.Fatalf("encoding product config response: %v", err)
+			}
+		case 2:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token for active-user validation, got %q", got)
+			}
+			w.Header().Set("Stake-Session-Token", "rotated-login-token")
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-personal", Email: "account@example.test", Username: "sample-user", AccountType: "INDIVIDUAL"}); err != nil {
+				t.Fatalf("encoding user response: %v", err)
+			}
+		case 3:
+			if r.Method != http.MethodGet || r.URL.Path != "/api/user" {
+				t.Fatalf("expected GET /api/user, got %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Stake-Session-Token"); got != "captured-token" {
+				t.Fatalf("expected captured token for explicit alias validation, got %q", got)
+			}
+			w.Header().Set("Stake-Session-Token", "rotated-login-token")
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(stake.User{UserID: "user-personal", Email: "account@example.test", Username: "sample-user", AccountType: "INDIVIDUAL"}); err != nil {
+				t.Fatalf("encoding user response: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected extra request %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	originalRunStakeLogin := runStakeLogin
+	t.Cleanup(func() {
+		runStakeLogin = originalRunStakeLogin
+	})
+
+	loginCalls := 0
+	runStakeLogin = func(_ context.Context, cfg stakelogin.Config, logger *log.Logger) (*stakelogin.Result, error) {
+		_ = cfg
+		_ = logger
+		loginCalls++
+		if loginCalls != 1 {
+			t.Fatalf("expected a single login call, got %d", loginCalls)
+		}
+		return &stakelogin.Result{Account: cfg.AccountName, Status: "session_token_detected", SessionToken: "captured-token"}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := execute(context.Background(), []string{
+		"--auth-store", storePath,
+		"--base-url", server.URL,
+		"auth", "login", "primary",
+	}, &stdout, io.Discard); err != nil {
+		t.Fatalf("execute returned error: %v", err)
+	}
+
+	updatedStore, err := sessionstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	primary, err := updatedStore.Get("primary")
+	if err != nil {
+		t.Fatalf("Get primary returned error: %v", err)
+	}
+	if primary.UserID != "user-personal" {
+		t.Fatalf("expected primary user id to be stored, got %q", primary.UserID)
+	}
+	if primary.SessionToken != "rotated-login-token" {
+		t.Fatalf("expected primary token to be refreshed, got %q", primary.SessionToken)
+	}
+
+	personal, err := updatedStore.Get("personal")
+	if err != nil {
+		t.Fatalf("Get personal returned error: %v", err)
+	}
+	if personal.UserID != "user-personal" {
+		t.Fatalf("expected generated personal alias user id to be stored, got %q", personal.UserID)
+	}
+	if personal.SessionToken != "rotated-login-token" {
+		t.Fatalf("expected generated personal alias token to be refreshed, got %q", personal.SessionToken)
+	}
+	if requestCount != 3 {
+		t.Fatalf("expected 3 API requests, got %d", requestCount)
+	}
+}
+
 func TestExecuteAuthLoginCommandFailsWhenSwitchedUserValidatesAsDifferentAccount(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "accounts.json")
 
